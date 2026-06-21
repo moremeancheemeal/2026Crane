@@ -672,6 +672,16 @@
               <FilePath>..\HARDWARE\MotorControlTask.h</FilePath>
             </File>
             <File>
+              <FileName>TrajTrack.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\HARDWARE\TrajTrack.c</FilePath>
+            </File>
+            <File>
+              <FileName>TrajTrack.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\HARDWARE\TrajTrack.h</FilePath>
+            </File>
+            <File>
               <FileName>Pid.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\HARDWARE\Pid.c</FilePath>

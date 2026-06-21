@@ -19,4 +19,6 @@ void ParamInit(void)
     {
         PID_struct_init(&Moto_sys_Pid_Spd[i], POSITION_PID, 15000, 500, 12.0f, 0.15f, 2.0f);
     }
+
+    MotorTrajInit();
 }
