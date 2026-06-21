@@ -1,0 +1,29 @@
+# Keil MDK build output
+MDK-ARM/CRANE_CHASSIS/
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.map
+*.lnp
+*.sct
+*.dep
+*.build_log.htm
+*.htm
+*.lst
+*.iex
+
+# Keil user/session files
+*.uvgui.*
+*.uvguix.*
+*.uvopt
+*.uvoptx
+
+# Editor and OS local files
+.vscode/
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*~
