@@ -36,6 +36,7 @@
 #include "PID.h"
 #include "Paraminit.h"
 #include "ControlTask.h" 
+#include "MotorControlTask.h"
 #include "flow_decode.h"
 #include "wit_c_sdk.h"
 #include "stdio.h"
@@ -269,7 +270,6 @@ int main(void)
 	  	if(TIM3_flag ==1)
 		{
 			TIM3_flag =0;
-			
 			AllTask();
 //			 if(RC_UPPER_RIGHT_SW_DOWN)
 //			 {

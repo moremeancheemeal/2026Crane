@@ -48,6 +48,8 @@ extern int SlideAngle;
 extern int ClawTargetAngle;
 
 void Straight(uint8_t direction, int targetdangle);
+void StraightFourPointLoopStart(int32_t point0, int32_t point1, int32_t point2, int32_t point3);
+void StraightFourPointLoopStop(void);
 void SLIDE(int angle);
 void Claw(uint8_t direction, int targetdangle);
 void ClawSetAngle(int target_angle);

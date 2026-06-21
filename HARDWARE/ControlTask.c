@@ -9,7 +9,6 @@
 uint8_t Remote_Control_Mode = 1;
 
 static GPIO_PinState pos_key_last = GPIO_PIN_SET;
-static uint8_t claw_test_close = 1U;
 
 static uint8_t KeyPressed(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState *last_state)
 {
@@ -50,22 +49,10 @@ void AllTask(void)
 
     if (KeyPressed(ABOARD_POS_KEY_PORT, ABOARD_POS_KEY_PIN, &pos_key_last))
     {
-        if (MotorControl_IsEnabled())
-        {
-            MotorControl_Stop();
-        }
-        else
+        if (!MotorControl_IsEnabled())
         {
             MotorControl_Enable();
-            if (claw_test_close)
-            {
-                ClawSetAngle(CLAW_CLOSED_ANGLE);
-            }
-            else
-            {
-                ClawSetAngle(CLAW_OPEN_ANGLE);
-            }
-            claw_test_close = !claw_test_close;
+            StraightFourPointLoopStart(-1636607, -2019861, 1652387, 1860000);
         }
     }
 }

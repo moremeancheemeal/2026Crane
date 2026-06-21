@@ -12,7 +12,7 @@ void ParamInit(void)
         PID_struct_init(&Moto_sys_Pid_Pos[i], POSITION_PID, 30, 10, 0.004f, 0.0f, 0.0f);
     }
 
-    PID_struct_init(&Moto_sys_Pid_Pos[SLIDE_203], POSITION_PID, 70, 10, 0.004f, 0.0f, 0.0f);
+    PID_struct_init(&Moto_sys_Pid_Pos[SLIDE_203], POSITION_PID, 150, 10, 0.004f, 0.0f, 0.0f);
     PID_struct_init(&Moto_sys_Pid_Pos[CLAW_206], POSITION_PID, 70, 10, 0.004f, 0.0f, 0.0f);
 
     for (int i = 0; i < MOTOR_NUM; i++)
