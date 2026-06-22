@@ -87,6 +87,14 @@ extern moto_measure_t Motor[MOTOR_NUM];  /* CAN 回传的电机原始数据 */
 #define X_CAL_POINT2   (1652387)
 #define X_CAL_POINT3   (1860000)
 
+/* ---- 夹爪旋转电机两个固定位置 ---- */
+#define CLAW_OPEN_ANGLE     0
+#define CLAW_CLOSED_ANGLE   9003204
+
+/* ---- 旋转电机(YAW)两个固定位置 ---- */
+#define YAW_OPEN_ANGLE      0
+#define YAW_CLOSED_ANGLE    98000
+
 /* vofa 监视:选要画曲线的轴(实际速度/目标速度/实际位置/目标位置 4 通道) */
 #define VOFA_WATCH_AXIS    AXIS_LIFT_Z
 /* vofa 上报分频:控制循环 500Hz,每 2 周期发一帧 => 250Hz */
@@ -126,5 +134,17 @@ uint8_t Z_IsReached(int32_t tol_counts);  /* Z 是否到位(非阻塞,轨迹走�
 
 /* Z 升降高度测试:按键交替式推进(三层->二层->一层->放货->回零,循环)。由按键回调调用。 */
 void    ZHeightStep(void);
+
+/* ---- 夹爪旋转电机控制 ---- */
+void    ClawSetTarget(int32_t angle_counts);  /* 设夹爪旋转电机目标角度(counts) */
+void    ClawOpen(void);                       /* 打开到 CLAW_OPEN_ANGLE */
+void    ClawClose(void);                      /* 关闭到 CLAW_CLOSED_ANGLE */
+void    ClawToggle(void);                     /* 在开/关两个位置之间切换 */
+
+/* ---- 旋转电机(YAW)控制 ---- */
+void    YawSetTarget(int32_t angle_counts);   /* 设旋转电机目标角度(counts) */
+void    YawOpen(void);                        /* 打开到 YAW_OPEN_ANGLE */
+void    YawClose(void);                       /* 关闭到 YAW_CLOSED_ANGLE */
+void    YawToggle(void);                      /* 在开/关两个位置之间切换 */
 
 #endif

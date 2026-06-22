@@ -47,10 +47,9 @@ void AllTask(void)
     }
     key_scan_cnt = 0;
 
-    /* Z 升降高度测试:按键每按一次推进一步,交替"使能去下一高度 / 失能"。
-     * 高度序列:三层 -> 二层 -> 一层 -> 放货 -> 回零,走完循环。 */
+    /* 夹爪两位置测试:按键按一下在开/关之间切换。 */
     if (KeyPressed(ABOARD_POS_KEY_PORT, ABOARD_POS_KEY_PIN, &pos_key_last))
     {
-        ZHeightStep();
+        ClawToggle();
     }
 }

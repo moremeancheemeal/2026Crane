@@ -55,7 +55,7 @@ axis_cfg_t axis_cfg[AXIS_NUM] =
 
     /* AXIS_CLAW (0x206) 爪子 —— 中等(原 CLAW_SPEED_SCALE=5 用 spd_scale 体现) */
     { 5, +1, MOTOR_REDUCTION_RATIO_3508,
-      150.0f, 450.0f, 3000.0f,
+      350.0f, 305.0f, 3052.0f,
       0.004f, 0.0f, 0.0f, 100u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u,
       5.0f },
@@ -148,6 +148,75 @@ void Axis_SetTargetXGantry(int32_t x)
 void set_z(int32_t z_counts)
 {
     Axis_SetTarget(AXIS_LIFT_Z, z_counts);
+}
+
+/* ============================================================================
+ * 夹爪旋转电机两位置控制
+ *   CLAW_OPEN_ANGLE / CLAW_CLOSED_ANGLE 是两个固定位置,外部直接调用即可。
+ *   为了避免在失能状态下设置目标被 MotorTargetSync 覆盖,这里会先确保控制已使能。
+ * ============================================================================ */
+static void TwoPosAxisSetTarget(axis_id_t id, int32_t angle_counts)
+{
+    if (!MotorControl_IsEnabled())
+    {
+        MotorControl_Enable();
+    }
+
+    Axis_SetTarget(id, angle_counts);
+}
+
+void ClawSetTarget(int32_t angle_counts)
+{
+    TwoPosAxisSetTarget(AXIS_CLAW, angle_counts);
+}
+
+void ClawOpen(void)
+{
+    ClawSetTarget(CLAW_OPEN_ANGLE);
+}
+
+void ClawClose(void)
+{
+    ClawSetTarget(CLAW_CLOSED_ANGLE);
+}
+
+void ClawToggle(void)
+{
+    if (Axis_GetPos(AXIS_CLAW) < ((CLAW_OPEN_ANGLE + CLAW_CLOSED_ANGLE) / 2))
+    {
+        ClawClose();
+    }
+    else
+    {
+        ClawOpen();
+    }
+}
+
+void YawSetTarget(int32_t angle_counts)
+{
+    TwoPosAxisSetTarget(AXIS_YAW, angle_counts);
+}
+
+void YawOpen(void)
+{
+    YawSetTarget(YAW_OPEN_ANGLE);
+}
+
+void YawClose(void)
+{
+    YawSetTarget(YAW_CLOSED_ANGLE);
+}
+
+void YawToggle(void)
+{
+    if (Axis_GetPos(AXIS_YAW) < ((YAW_OPEN_ANGLE + YAW_CLOSED_ANGLE) / 2))
+    {
+        YawClose();
+    }
+    else
+    {
+        YawOpen();
+    }
 }
 
 int32_t Z_GetHeight(void)
