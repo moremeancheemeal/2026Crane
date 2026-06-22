@@ -7,18 +7,7 @@
 
 void ParamInit(void)
 {
-    for (int i = 0; i < 2; i++)
-    {
-        PID_struct_init(&Moto_sys_Pid_Pos[i], POSITION_PID, 30, 10, 0.004f, 0.0f, 0.0f);
-    }
-
-    PID_struct_init(&Moto_sys_Pid_Pos[SLIDE_203], POSITION_PID, 70, 10, 0.004f, 0.0f, 0.0f);
-    PID_struct_init(&Moto_sys_Pid_Pos[CLAW_206], POSITION_PID, 70, 10, 0.004f, 0.0f, 0.0f);
-
-    for (int i = 0; i < MOTOR_NUM; i++)
-    {
-        PID_struct_init(&Moto_sys_Pid_Spd[i], POSITION_PID, 15000, 500, 12.0f, 0.15f, 2.0f);
-    }
-
-    MotorTrajInit();
+    /* 全部轴(轨迹 + 双环 PID)由编译期配置表 axis_cfg[] 驱动初始化。
+     * 每个电机的 V/A/J、PID、减速比、方向都在 MotorControlTask.c 的配置表里改。 */
+    Axis_InitAll();
 }

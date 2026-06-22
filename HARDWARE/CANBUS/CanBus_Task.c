@@ -38,14 +38,10 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *_hcan)
 
     if (_hcan->Instance == CAN1)
     {
-        if (rx_header.StdId >= CAN_3508Moto1_ID && rx_header.StdId <= CAN_3508Moto3_ID)
+        /* 6 个 M3508:0x201~0x206 连续映射到 Motor[0..5](= ID - 0x201) */
+        if (rx_header.StdId >= CAN_3508Moto1_ID && rx_header.StdId <= CAN_3508Moto6_ID)
         {
             motor_index = (uint8_t)(rx_header.StdId - CAN_3508Moto1_ID);
-            motor_found = 1;
-        }
-        else if (rx_header.StdId == CAN_3508Moto6_ID)
-        {
-            motor_index = CLAW_206;
             motor_found = 1;
         }
 

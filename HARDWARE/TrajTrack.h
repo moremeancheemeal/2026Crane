@@ -22,8 +22,9 @@
  *             待当前轨迹结束后自动接着规划。
  */
 
-/* 控制周期,与 TIM3(1kHz)调用 TrajTrack_Calc 的节奏一致 */
-#define MOTOR_CONTROL_PERIOD   0.001f
+/* 控制周期,与 TIM3 调用 TrajTrack_Calc 的节奏一致。
+ * TIM3: 84MHz / 168 / 1000 = 500Hz,故每周期 2ms。 */
+#define MOTOR_CONTROL_PERIOD   0.002f
 
 typedef struct
 {

@@ -219,8 +219,9 @@ int main(void)
 	HAL_UART_Receive_IT_IDLE(&huart1,UART_Buffer,100); //閬ユ帶鍣ㄤ覆鍙ｅ垵濮嬪寲
 	HAL_UART_Receive_IT(&huart6, &Flow_Rx_Buffer ,1);//鍏夋祦璁℃帴鏀朵腑鏂?
 	HAL_UART_Receive_IT(&huart7, &IMU_Rx_Buffer, 1);//IMU鎺ユ敹涓柇
-	HAL_UART_Receive_IT(&huart8, &uart_rx_buffer[buffer_index], 1);//涓婁綅鏈烘帴鏀朵腑鏂?
-	HAL_UART_Transmit_IT(&huart8, &stopflag, 1);//涓婁綅鏈哄彂閫佷腑鏂?
+//	HAL_UART_Receive_IT(&huart8, &uart_rx_buffer[buffer_index], 1);//涓婁綅鏈烘帴鏀朵腑鏂?
+//	HAL_UART_Receive_IT(&huart8, &uart_rx_buffer[buffer_index], 1);//涓婁綅鏈烘帴鏀朵腑鏂?
+	/* 原 UART8 上位机发送中断(stopflag 自循环)已移除,改作 vofa/日志专用口 */
 
 //	kalman_Init();
 //	while (!(s_cDataUpdate & ANGLE_UPDATE))
@@ -394,7 +395,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 				buffer_index = 0;
 			}
 		}
-			HAL_UART_Receive_IT(&huart8, &uart_rx_buffer[buffer_index], 1);
+		//	HAL_UART_Receive_IT(&huart8, &uart_rx_buffer[buffer_index], 1);
 
 	}
 	
@@ -403,10 +404,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if (huart->Instance  == UART8)
-	{
-	HAL_UART_Transmit_IT(&huart8, &stopflag, 1);//涓婁綅鏈哄彂閫佷腑鏂?
-	}
+	/* 原上位机 stopflag 自循环发送已移除:UART8 现作为 vofa/日志专用口,
+	 * 由 MotorVofaReport() 主动发送,不再在此自循环占用发送带宽。 */
+	(void)huart;
 }
 
 void CopeCmdData(unsigned char ucData)

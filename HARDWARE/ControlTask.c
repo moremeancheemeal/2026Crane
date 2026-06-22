@@ -9,7 +9,6 @@
 uint8_t Remote_Control_Mode = 1;
 
 static GPIO_PinState pos_key_last = GPIO_PIN_SET;
-static uint8_t claw_test_close = 1U;
 
 static uint8_t KeyPressed(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState *last_state)
 {
@@ -48,6 +47,8 @@ void AllTask(void)
     }
     key_scan_cnt = 0;
 
+    /* 按键暂作"使能/失能"切换。机械臂上层运动逻辑(用 Axis_SetTarget /
+     * Axis_SetTargetXGantry 给各轴目标)以后再接入。 */
     if (KeyPressed(ABOARD_POS_KEY_PORT, ABOARD_POS_KEY_PIN, &pos_key_last))
     {
         if (MotorControl_IsEnabled())
@@ -57,15 +58,6 @@ void AllTask(void)
         else
         {
             MotorControl_Enable();
-            if (claw_test_close)
-            {
-                ClawSetAngle(CLAW_CLOSED_ANGLE);
-            }
-            else
-            {
-                ClawSetAngle(CLAW_OPEN_ANGLE);
-            }
-            claw_test_close = !claw_test_close;
         }
     }
 }
