@@ -3,6 +3,7 @@
 #include "can.h"
 #include "usart.h"
 #include "vofaPlus.h"
+#include "XYPath.h"
 
 /* ============================================================================
  * 编译期配置表 —— 每个轴一行,改参数只改这里
@@ -59,6 +60,10 @@ moto_measure_t  Motor[MOTOR_NUM];
 
 static uint8_t motor_control_enable = 0U;
 
+/* XY 联动路径插值器(折线 + 拐角圆弧)。路径模式下 X/Y 的位置环 ref 取自这里,
+ * 绕过各轴自己的 axis[i].traj,保证末端沿确定几何路径绕障。其余轴不受影响。 */
+static xy_path_t crane_path;
+
 /* ---- X 轴标定点(留作参考,来自原四点位测试) ---- */
 const int32_t X_CalPoints[4] = { X_CAL_POINT0, X_CAL_POINT1, X_CAL_POINT2, X_CAL_POINT3 };
 
@@ -86,6 +91,15 @@ void Axis_InitAll(void)
 
         axis[i].target = 0;
     }
+
+    /* XY 联动路径插值器:弧长 S 曲线的 V/A/J 取保守值(沿路径合速度的 counts 量纲)。
+     * ⚠ 合速度会按切向分解到 X、Y,任一分量不得超该轴上限。这里先用 SLIDE_Y 的约束
+     *   作为合速度上限(Y 通常是较慢/较短的一轴),联调时按实际路径再调。 */
+    XYPath_Init(&crane_path,
+                axis_cfg[AXIS_SLIDE_Y].vmax_rpm * TRAJ_RPM_TO_COUNTS,
+                axis_cfg[AXIS_SLIDE_Y].amax_rpm * TRAJ_RPM_TO_COUNTS,
+                axis_cfg[AXIS_SLIDE_Y].jmax_rpm * TRAJ_RPM_TO_COUNTS,
+                MOTOR_CONTROL_PERIOD);
 }
 
 /* 读某轴实测位置(dir 校正,与轨迹/目标同坐标系) */
@@ -131,6 +145,58 @@ void Axis_SetTargetXGantry(int32_t x)
 {
     Axis_SetTarget(AXIS_GANTRY_L, x);
     Axis_SetTarget(AXIS_GANTRY_R, x);
+}
+
+/* ============================================================================
+ * XY 联动路径上层封装 —— 给 CraneFlow / 测试入口用,不直接碰 crane_path 内部
+ * ----------------------------------------------------------------------------
+ * 典型用法(非阻塞):
+ *   CranePath_Run(pts, num, blend);     // 构建并启动一条绕障路径
+ *   ... 每周期 MotorSysTask 自动 XYPath_Tick,X/Y 自动跟踪 ...
+ *   if (CranePath_IsDone()) CranePath_Finish();   // 到位后收尾,X/Y 交还各轴 traj
+ * ============================================================================ */
+
+/* 构建并启动一条路径。pts 为 counts 域航点(map_pt_t),blend 为拐角圆弧半径 counts。
+ * 启动瞬间把 X/Y 各轴 traj 同步到实测位置,避免收尾切换时跳变。 */
+void CranePath_Run(const map_pt_t *pts, uint8_t num, float blend_radius)
+{
+    if (!MotorControl_IsEnabled())
+    {
+        MotorControl_Enable();
+    }
+
+    XYPath_Build(&crane_path, pts, num, blend_radius);
+    XYPath_Start(&crane_path,
+                 (float)Axis_GetPos(AXIS_GANTRY_L),
+                 (float)Axis_GetPos(AXIS_SLIDE_Y));
+}
+
+uint8_t CranePath_IsActive(void)
+{
+    return XYPath_IsActive(&crane_path);
+}
+
+uint8_t CranePath_IsDone(void)
+{
+    return XYPath_IsDone(&crane_path);
+}
+
+/* 收尾:退出路径模式,把 X/Y 各轴 traj/target 复位到当前实测位置,
+ * 使后续单轴 Axis_SetTarget 从当前点平滑接续,不跳变。 */
+void CranePath_Finish(void)
+{
+    XYPath_Stop(&crane_path);
+
+    int32_t xl = Axis_GetPos(AXIS_GANTRY_L);
+    int32_t xr = Axis_GetPos(AXIS_GANTRY_R);
+    int32_t y  = Axis_GetPos(AXIS_SLIDE_Y);
+
+    axis[AXIS_GANTRY_L].target = xl;
+    TrajTrack_Reset(&axis[AXIS_GANTRY_L].traj, (float)xl);
+    axis[AXIS_GANTRY_R].target = xr;
+    TrajTrack_Reset(&axis[AXIS_GANTRY_R].traj, (float)xr);
+    axis[AXIS_SLIDE_Y].target = y;
+    TrajTrack_Reset(&axis[AXIS_SLIDE_Y].traj, (float)y);
 }
 
 /* ============================================================================
@@ -240,7 +306,7 @@ static const int32_t z_height_points[Z_HEIGHT_NUM] =
     -99655,    /* 第二层 */
     Z_TOP,     /* 抬顶(去一层前) */
     -58970,    /* 第一层 */
-    -87476,    /* 放货高度 */
+    -36243,    /* 放货高度(与 FLOW_Z_PLACE 对齐,原 -87476 为过时旧值) */
     Z_TOP,     /* 放货后抬顶 */
     0,         /* 回 Z0(上电高度) */
 };
@@ -514,14 +580,35 @@ uint8_t MotorControl_IsEnabled(void)
  * ============================================================================ */
 void MotorPidCalc(void)
 {
+    uint8_t path_on = XYPath_IsActive(&crane_path);
+
     for (uint8_t i = 0; i < AXIS_NUM; i++)
     {
         const axis_cfg_t *c = &axis_cfg[i];
 
-        float ref = axis[i].traj.out;
-        /* 速度前馈:轨迹瞬时速度(转子 counts/s)-> 转子 RPM,叠加到速度环 ref,
-         * 消除纯P位置环滞后,使电机随 S 曲线同步减速、到点即零速、不过冲反转。 */
-        float ff  = axis[i].traj.vel / RPM_TO_COUNTS_PER_SEC;
+        float ref;
+        float ff;
+
+        /* 路径模式:X(GANTRY_L/R)与 Y(SLIDE_Y)的位置环 ref 取自 XYPath,
+         * 绕过各轴 axis[i].traj,保证末端沿确定几何路径绕障。
+         * 前馈暂置 0(后期再按 x_ff/y_ff 接入);其余轴仍走各自 traj。 */
+        if (path_on && (i == AXIS_GANTRY_L || i == AXIS_GANTRY_R))
+        {
+            ref = crane_path.x_ref;
+            ff  = 0.0f;
+        }
+        else if (path_on && i == AXIS_SLIDE_Y)
+        {
+            ref = crane_path.y_ref;
+            ff  = 0.0f;
+        }
+        else
+        {
+            ref = axis[i].traj.out;
+            /* 速度前馈:轨迹瞬时速度(转子 counts/s)-> 转子 RPM,叠加到速度环 ref,
+             * 消除纯P位置环滞后,使电机随 S 曲线同步减速、到点即零速、不过冲反转。 */
+            ff  = axis[i].traj.vel / RPM_TO_COUNTS_PER_SEC;
+        }
 
         pid_calc(&axis[i].pid_pos,
                  (float)(c->dir * Motor[c->can_index].total_angle),
@@ -593,6 +680,14 @@ void MotorSysTask(void)
         for (uint8_t i = 0; i < AXIS_NUM; i++)
         {
             TrajTrack_Calc(&axis[i].traj);
+        }
+
+        /* 路径模式:推进弧长 S 曲线 -> 插值出 X/Y 平面 ref(MotorPidCalc 里取用)。
+         * 与 TrajTrack_Calc 同频(2ms)。X/Y 的 axis[].traj 仍在上面被推进,但路径模式下
+         * 其 out 不被 MotorPidCalc 采用,联调收尾时由 CranePath_Stop 把 traj 复位对齐。 */
+        if (XYPath_IsActive(&crane_path))
+        {
+            XYPath_Tick(&crane_path);
         }
 
         MotorPidCalc();

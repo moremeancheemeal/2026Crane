@@ -682,6 +682,21 @@
               <FilePath>..\HARDWARE\TrajTrack.h</FilePath>
             </File>
             <File>
+              <FileName>XYPath.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\HARDWARE\XYPath.c</FilePath>
+            </File>
+            <File>
+              <FileName>XYPath.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\HARDWARE\XYPath.h</FilePath>
+            </File>
+            <File>
+              <FileName>MapCoords.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\HARDWARE\MapCoords.h</FilePath>
+            </File>
+            <File>
               <FileName>Pid.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\HARDWARE\Pid.c</FilePath>

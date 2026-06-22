@@ -4,6 +4,7 @@
 #include "PID.h"
 #include "CanBus_Task.h"
 #include "TrajTrack.h"
+#include "MapCoords.h"
 
 #define MOTOR_REDUCTION_RATIO_3508 19.2f
 
@@ -152,5 +153,15 @@ void    YawToggle(void);                      /* 在开/关两个位置之间切
  * CraneFlow_Tick():每控制周期调用,处理步骤内"到位后自动接续"。 */
 void    CraneFlow_Step(void);
 void    CraneFlow_Tick(void);
+
+/* ---- XY 联动路径上层封装(折线 + 拐角圆弧绕障,非阻塞) ----
+ * CranePath_Run():构建并启动一条 counts 域航点路径(blend_radius=拐角圆弧半径)。
+ * CranePath_IsActive()/IsDone():路径模式状态 / 是否走完。
+ * CranePath_Finish():收尾,退出路径模式并把 X/Y 各轴 traj 复位对齐到实测位置。
+ * 启动后由 MotorSysTask 每周期自动 XYPath_Tick,X/Y 位置环 ref 自动取路径插值值。 */
+void    CranePath_Run(const map_pt_t *pts, uint8_t num, float blend_radius);
+uint8_t CranePath_IsActive(void);
+uint8_t CranePath_IsDone(void);
+void    CranePath_Finish(void);
 
 #endif
