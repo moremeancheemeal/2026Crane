@@ -1,17 +1,22 @@
 # ============================================================
 #  lower_main.py — 下位机 MaixCAM
-#  功能：舵机旋转5个位置 → 每个位置拍30帧OCR识别 → TCP连接上位机
-#  【修改版】连接后扫描一遍，之后只在上位机发START时才再扫
+#  连接上位机WiFi AP → 舵机旋转5个位置 → 每位置30帧OCR → TCP通信
+#  只在收到上位机START时才扫描
 # ============================================================
 
-# ======================== 导入模块 ========================
 import socket
 import threading
 from maix import camera, display, image, nn, pwm, pinmap, sys, err, app
+from maix import network
 from maix import time as maix_time
 
 # ======================== 网络配置 ========================
-UPPER_IP   = "192.168.1.100"
+# 连接上位机的WiFi热点
+WIFI_SSID   = "maixcam"
+WIFI_PASSWD = "12345678"
+
+# TCP连接上位机（上位机AP的IP）
+UPPER_IP   = "192.168.66.1"
 UPPER_PORT = 9090
 RECON_SEC  = 1
 
@@ -21,12 +26,15 @@ SETTLE_MS       = 500    # 舵机到位后等待时间(毫秒)，等画面稳定
 FRAMES_PER_POS  = 30     # 每个位置拍多少帧再OCR，越多越准但越慢
 
 # ======================== 舵机PWM参数 ========================
+# 大多数舵机: 50Hz, 0.5ms~2.5ms 对应 0°~180°
+# 占空比: 0.5/20=2.5%  2.5/20=12.5%
 DUTY_MIN   = 2.5
 DUTY_MAX   = 12.5
 SERVO_MIN_ANGLE = 0
 SERVO_MAX_ANGLE = 180
 
 # ======================== 5个位置的舵机角度(度) ========================
+# 直接填角度值(度)，程序会自动转换成PWM占空比
 SERVO_DEG = [
     0,    # 位置1 舵机角度(度) ← 根据实际调试修改
     45,   # 位置2 舵机角度(度) ← 根据实际调试修改
@@ -36,17 +44,26 @@ SERVO_DEG = [
 ]
 
 # ======================== 调试模式开关 ========================
-# -1  = 正常模式
-# 0~4 = 只停在指定位置，方便调试
+# -1  = 正常模式，5个位置全部扫描
+# 0~4 = 只停在指定位置（方便单独调试该位置的舵机角度）
 DEBUG_STEP = -1
+
+
+# ======================== 连接WiFi ========================
+print("[WIFI] 连接上位机热点...")
+wifi = network.wifi.Wifi()
+wifi.connect(WIFI_SSID, WIFI_PASSWD)
+print(f"[WIFI] 已连接")
 
 
 # ======================== 舵机初始化 ========================
 
 def deg_to_duty(deg):
+    """角度(度) → PWM占空比(%)"""
     deg = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, deg))
     pct = (deg - SERVO_MIN_ANGLE) / (SERVO_MAX_ANGLE - SERVO_MIN_ANGLE) * 100
     return (DUTY_MAX - DUTY_MIN) * pct / 100.0 + DUTY_MIN
+
 
 dev = sys.device_id()
 pn  = "A31" if dev == "maixcam2" else "A19"
@@ -183,6 +200,7 @@ cli = Cli(UPPER_IP, UPPER_PORT)
 
 # ======================== OCR识别 ========================
 def read_num(img):
+    """从图像中OCR识别数字1~5"""
     try:
         for obj in ocr.detect(img):
             for ch in obj.char_str().strip():
@@ -203,23 +221,13 @@ def vote_result(results):
     返回：
         int  — 投票选出的最终数字
         None — 全部帧都没识别到
-
-    逻辑：
-        1. 统计每个数字出现的次数（忽略None）
-        2. 出现次数最多的那个就是最终结果
-        3. 如果全部都是None，返回None
     """
-    # 只看有效的识别结果
     valid = [v for v in results if v is not None]
     if not valid:
         return None
-
-    # 统计每个数字出现次数
     count = {}
     for v in valid:
         count[v] = count.get(v, 0) + 1
-
-    # 返回出现次数最多的数字
     return max(count, key=count.get)
 
 
@@ -235,40 +243,30 @@ def scan():
     st.begin()
     print("\n  === 扫描 ===")
 
-    # ---- 调试模式：只停在某一个位置，拍30帧 ----
+    # ---- 调试模式：只停在某一个位置 ----
     if 0 <= DEBUG_STEP < N_STEPS:
         i = DEBUG_STEP
         deg = SERVO_DEG[i]
-
-        # 舵机转到目标角度
         servo.duty(deg_to_duty(deg))
-        # 等舵机到位 + 画面稳定
         maix_time.sleep_ms(SETTLE_MS)
 
-        # 拍FRAMES_PER_POS帧，每帧都做OCR
         frames_result = []
         for f in range(FRAMES_PER_POS):
             img = cam.read()
             v = read_num(img)
             frames_result.append(v)
-            # 每10帧打印一次进度
             if (f + 1) % 10 == 0:
                 print(f"  [DEBUG] pos{i+1} 第{f+1}/{FRAMES_PER_POS}帧")
 
-        # 投票选出最终结果
         final = vote_result(frames_result)
-
-        # 统计信息
         valid_count = sum(1 for v in frames_result if v is not None)
         st.put(i, final)
 
-        # 屏幕显示
         t = str(final) if final else "X"
         c = image.COLOR_GREEN if final else image.COLOR_RED
         img.draw_string(10, 10, f"[DEBUG] pos{i+1} {deg}deg {valid_count}/{FRAMES_PER_POS} val={t}", c)
         disp.show(img)
-
-        print(f"  [DEBUG] 位置{i+1} 角度={deg}° 有效帧={valid_count}/{FRAMES_PER_POS} 结果={t}")
+        print(f"  [DEBUG] 位置{i+1} 角度={deg}  有效帧={valid_count}/{FRAMES_PER_POS} 结果={t}")
         st.end()
         return
 
@@ -278,33 +276,24 @@ def scan():
             break
 
         deg = SERVO_DEG[i]
-
-        # 舵机转到目标角度
         servo.duty(deg_to_duty(deg))
-        # 等舵机到位 + 画面稳定
         maix_time.sleep_ms(SETTLE_MS)
 
-        # 拍FRAMES_PER_POS帧，每帧都做OCR
         frames_result = []
         for f in range(FRAMES_PER_POS):
             img = cam.read()
             v = read_num(img)
             frames_result.append(v)
 
-        # 投票选出最终结果
         final = vote_result(frames_result)
-
-        # 统计有效帧数
         valid_count = sum(1 for v in frames_result if v is not None)
         st.put(i, final)
 
-        # 屏幕显示
         t = str(final) if final else "X"
         c = image.COLOR_GREEN if final else image.COLOR_RED
         img.draw_string(10, 10, f"{i+1}/5 {deg}deg {valid_count}/{FRAMES_PER_POS} val={t}", c)
         disp.show(img)
-
-        print(f"  [{i+1}/5] 角度={deg}° 有效帧={valid_count}/{FRAMES_PER_POS} 结果={t}")
+        print(f"  [{i+1}/5] 角度={deg}  有效帧={valid_count}/{FRAMES_PER_POS} 结果={t}")
 
     st.end()
     print(f"  完成: [{st.to_str()}]\n")
@@ -320,13 +309,8 @@ while st.running and not app.need_exit():
         break
     maix_time.sleep_ms(100)
 
-# ---- 第二步：连上后自动扫描一遍 ----
-if st.running and not app.need_exit():
-    print("[SYS] TCP已连接，自动扫描第一遍...")
-    scan()
-
-# ---- 第三步：待命，只等上位机发START才再扫 ----
-print("[SYS] 扫描完成，等待上位机指令...")
+# ---- 第二步：待命，只等上位机发START才扫描 ----
+print("[SYS] 已就绪，等待上位机START指令...")
 while st.running and not app.need_exit():
     while st.running and not app.need_exit():
         if st.trigger:
