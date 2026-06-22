@@ -1,12 +1,12 @@
 # ============================================================
 #  upper_main.py — 主上位机 MaixCAM
-#  触摸屏按钮 + 自学习分类 + TCP服务端 + UART通信
+#  WiFi AP热点 + 触摸屏按钮 + 自学习分类 + TCP服务端 + UART通信
 #
 #  流程:
-#    1. 上电 → 初始化 → TCP监听
-#    2. 下位机连上 → 屏幕显示"START"按钮
+#    1. 上电 → 启动WiFi AP → 初始化 → TCP监听
+#    2. 下位机连上WiFi + TCP → 屏幕显示"START"按钮
 #    3. 点击"START" → 发START给下位机 → 进入3轮分类
-#    4. 每轮: 显示进度 + "REC"按钮 → 用户放物品 → 点击 → 分类
+#    4. 每轮: "REC"按钮 → 用户放物品 → 点击 → 分类
 #    5. 3轮完成 → 查询下位机OCR结果 → 匹配
 #    6. 显示结果 + "RESET"按钮 → 点击回到步骤2
 #
@@ -17,22 +17,45 @@ import socket
 import threading
 from maix import camera, display, image, nn, sys, pinmap, uart, err, app
 from maix import touchscreen
+from maix import network
 from maix import time as maix_time
 
 # ======================== 配置 ========================
-UART_PORT       = "/dev/ttyS0"
-UART_BAUD       = 115200
-TCP_IP          = "0.0.0.0"
-TCP_PORT        = 9090
+# WiFi AP 配置
+WIFI_SSID    = "maixcam"       # 热点名称
+WIFI_PASSWD  = "12345678"      # 热点密码(至少8位)
+WIFI_CHANNEL = 6               # WiFi信道
+
+# 网络配置
+TCP_IP   = "0.0.0.0"           # TCP监听所有网卡
+TCP_PORT = 9090
+AP_IP    = "192.168.66.1"      # AP默认IP(start_ap的默认参数)
+
+# UART 配置
+UART_PORT = "/dev/ttyS0"
+UART_BAUD = 115200
+
+# 分类器配置
 CLASSIFIER_PATH = "/root/my_classes.bin"
 MODEL_PATH      = "/root/models/mobilenet_v2_no_top.mud"
 
+# 映射: index → 含义 (按官方App创建顺序)
+#   idx 0 → 1 = 黄(yellow)
+#   idx 1 → 2 = 绿(green)
+#   idx 2 → 3 = 白(white)
 IDX_TO_NAME = {0: "yellow", 1: "green", 2: "white"}
-REQUIRED    = 3
+REQUIRED    = 3   # 累计3次分类后触发匹配
 
-# ======================== 初始化硬件 ========================
+# ======================== 初始化 WiFi AP ========================
+print("[WIFI] 启动 AP 模式...")
+wifi = network.wifi.Wifi()
+wifi.start_ap(WIFI_SSID, WIFI_PASSWD, channel=WIFI_CHANNEL)
+print(f"[WIFI] AP 启动成功")
+print(f"[WIFI] SSID: {WIFI_SSID}")
+print(f"[WIFI] 密码: {WIFI_PASSWD}")
+print(f"[WIFI] AP IP: {AP_IP}")
 
-# UART
+# ======================== 初始化 UART ========================
 try:
     ser = uart.UART(UART_PORT, UART_BAUD)
     uart_ok = True
@@ -41,10 +64,10 @@ except Exception as e:
     print(f"[UART] 失败: {e}")
     uart_ok = False
 
-# 触摸屏
+# ======================== 初始化触摸屏 ========================
 touch = touchscreen.TouchScreen()
 
-# 分类器
+# ======================== 初始化分类器 ========================
 clf = nn.SelfLearnClassifier(model=MODEL_PATH, dual_buff=True)
 try:
     clf.load(CLASSIFIER_PATH)
@@ -53,7 +76,7 @@ except Exception as e:
     print(f"[INIT] 加载失败: {e}")
     print("[INIT] 请先用官方「自学习分类器」App 训练并保存")
 
-# 摄像头 & 显示
+# ======================== 初始化摄像头 & 显示 ========================
 cam  = camera.Camera(clf.input_width(), clf.input_height(), clf.input_format())
 disp = display.Display()
 
@@ -72,7 +95,6 @@ except:
     pass
 
 # ======================== UI 工具 ========================
-
 # 按钮位置和大小(图像坐标系，显示时会自动缩放到屏幕)
 BTN_W = int(IW * 0.5)
 BTN_H = int(IH * 0.12)
@@ -132,9 +154,9 @@ class State:
     def __init__(self):
         self._l = threading.Lock()
         self.running = True
-        self.conn = None       # 下位机socket连接
-        self.ocr  = None       # 下位机返回的OCR结果
-        self.evt  = threading.Event()  # 等待OCR结果的事件
+        self.conn    = None                # 下位机socket连接
+        self.ocr     = None                # 下位机返回的OCR结果
+        self.evt     = threading.Event()   # 等待OCR结果的事件
 
     def set_conn(self, c):
         with self._l:
@@ -202,7 +224,7 @@ def _handle_tcp(msg):
         st.ocr = r
         st.evt.set()
     elif msg == "SCANNING":
-        # 下位机还在扫描中
+        # 下位机还在扫描中，通知上位机"还没好"
         st.ocr = None
         st.evt.set()
     elif msg.startswith("ACK:"):
@@ -235,7 +257,7 @@ def match_fn(classes, ocr):
     """
     classes: [2, 1, 3]        — 3次分类编号
     ocr:     [3, 1, 5, 2, 4]  — 5个位置的OCR编号
-    返回:    [4, 2, 1]        — 每个分类在OCR第几位(1开始, 0=未找到)
+    返回:    [4, 2, 1]        — 每个分类在OCR第几位(1-indexed, 0=未找到)
     """
     res = []
     for c in classes:
@@ -260,6 +282,8 @@ threading.Thread(target=tcp_server, daemon=True).start()
 uart_write("READY")
 print("[SYS] 上位机就绪")
 print(f"[SYS] 映射: {IDX_TO_NAME}")
+print(f"[SYS] 请将下位机连接 WiFi: {WIFI_SSID} / {WIFI_PASSWD}")
+print(f"[SYS] 请将下位机 UPPER_IP 设为: {AP_IP}")
 
 # UI 变量
 step = STEP_IDLE
@@ -315,8 +339,11 @@ while st.running and not app.need_exit():
             img.draw_string(10, 10, "Slave: --", image.COLOR_RED)
             img.draw_string(10, 28, "Waiting...", image.COLOR_GRAY)
 
+        # 显示WiFi信息
+        img.draw_string(10, IH - 45, f"AP:{WIFI_SSID}", image.COLOR_YELLOW)
+
         if status_msg:
-            img.draw_string(10, IH - 45, status_msg, image.COLOR_YELLOW)
+            img.draw_string(10, IH - 65, status_msg, image.COLOR_YELLOW)
 
     # ============================================================
     #                  STEP_CLASSIFY  分类状态
@@ -338,7 +365,7 @@ while st.running and not app.need_exit():
         if pressed_edge and hit_btn(tx, ty):
             try:
                 idx, score = clf.classify(img)
-                cls_num = idx + 1
+                cls_num = idx + 1          # idx → num
                 cls_list.append(cls_num)
                 cls_count += 1
                 name = IDX_TO_NAME.get(idx, "?")
