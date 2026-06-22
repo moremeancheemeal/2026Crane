@@ -85,7 +85,9 @@ extern moto_measure_t Motor[MOTOR_NUM];  /* CAN 回传的电机原始数据 */
 #define X_CAL_POINT2   (1652387)
 #define X_CAL_POINT3   (1860000)
 
-/* ---- 夹爪旋转电机两个固定位置 ---- */
+/* ---- 夹爪旋转电机两个固定位置 ----
+ * 正常约定:上电在"松开"位置归零,故开=0;"+方向=闭合",闭=+9003204。
+ * (此前为救闭合断电卡死的爪子曾临时反转,松开后已恢复正常约定。) */
 #define CLAW_OPEN_ANGLE     0
 #define CLAW_CLOSED_ANGLE   9003204
 
@@ -144,5 +146,11 @@ void    YawSetTarget(int32_t angle_counts);   /* 设旋转电机目标角度(cou
 void    YawOpen(void);                        /* 打开到 YAW_OPEN_ANGLE */
 void    YawClose(void);                       /* 关闭到 YAW_CLOSED_ANGLE */
 void    YawToggle(void);                      /* 在开/关两个位置之间切换 */
+
+/* ---- 自动取放货流程(非阻塞) ----
+ * CraneFlow_Step():按键调用,推进到下一个大步骤(共6步,走完再按从头)。
+ * CraneFlow_Tick():每控制周期调用,处理步骤内"到位后自动接续"。 */
+void    CraneFlow_Step(void);
+void    CraneFlow_Tick(void);
 
 #endif

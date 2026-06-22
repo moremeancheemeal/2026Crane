@@ -39,6 +39,7 @@ void AllTask(void)
     static uint8_t key_scan_cnt = 0;
 
     MotorSysTask();
+    CraneFlow_Tick();           /* 每周期推进自动取放流程的"到位后接续" */
 
     key_scan_cnt++;
     if (key_scan_cnt < 10)
@@ -47,9 +48,9 @@ void AllTask(void)
     }
     key_scan_cnt = 0;
 
-    /* 夹爪两位置测试:按键按一下在开/关之间切换。 */
+    /* 自动取放货流程:按键每按一次推进一个大步骤(共6步,走完再按从头)。 */
     if (KeyPressed(ABOARD_POS_KEY_PORT, ABOARD_POS_KEY_PIN, &pos_key_last))
     {
-        ClawToggle();
+        CraneFlow_Step();
     }
 }

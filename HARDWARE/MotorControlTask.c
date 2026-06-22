@@ -230,7 +230,7 @@ uint8_t Z_IsReached(int32_t tol_counts)
  * ⚠ 注意:Z 为升降轴,在"顶"高度失能会被重力拉下;分步式按你要求保留,
  *   若掉落不可接受,改连贯式(一按完成抬顶+受控下降,全程不失能)。
  * ============================================================================ */
-#define Z_TOP          (-236461)   /* 升降最大高度(顶部) */
+#define Z_TOP          (-230000)   /* 升降最高(留余量,避免顶死硬限位) */
 #define Z_HEIGHT_NUM   9
 static const int32_t z_height_points[Z_HEIGHT_NUM] =
 {
@@ -263,6 +263,152 @@ void ZHeightStep(void)
     if (z_height_index >= Z_HEIGHT_NUM)
     {
         z_height_index = 0U;            /* 走完回零后循环 */
+    }
+}
+
+/* ============================================================================
+ * 自动取放货流程(非阻塞状态机)
+ * ----------------------------------------------------------------------------
+ * 按键推进"大步骤",步骤内部"到位后自动接续"由 CraneFlow_Tick() 每控制周期轮询。
+ * 升降优先:先升/降 Z 到位,再横移 X(或反之),避免未抬升就横移撞障碍。
+ *
+ *   按1: 升到顶 ↳到位后 横移到 X_CAL_POINT0
+ *   按2: 降到三层 ↳到位后 爪闭合 ↳到位后 升到顶
+ *   按3: 横移到 X_CAL_POINT3
+ *   按4: 降到放货高度
+ *   按5: 爪松开 ↳到位后 升到顶
+ *   按6: 横移回原点 X0 ↳到位后 降到底部 Z0
+ *
+ * 全程保持使能(Z 升降轴不失能,避免重力掉落)。
+ * ============================================================================ */
+#define FLOW_Z_LEVEL3      (-142959)   /* 第三层 */
+#define FLOW_Z_PLACE       (-36243)    /* 放货高度 */
+#define FLOW_Z_BOTTOM      (0)         /* 底部 = 上电 Z0 */
+#define FLOW_X_HOME        (0)         /* 原点 = 上电 X0 */
+
+/* 到位容差(分轴):X 行程大给宽些,Z 中等,爪行程很大给最宽 */
+#define FLOW_TOL_X         15000
+#define FLOW_TOL_Z         10000
+#define FLOW_TOL_CLAW      40000
+
+/* 流程子状态:某个大步骤内"等到位再接续"的阶段 */
+typedef enum
+{
+    SUB_DONE = 0,       /* 当前大步骤已跑完,等下一次按键 */
+
+    /* 按1: 升顶 -> 横移 P0 */
+    SUB_1_LIFT_TOP,
+    SUB_1_MOVE_P0,
+    /* 按2: 降三层 -> 爪闭合 -> 升顶 */
+    SUB_2_DOWN_L3,
+    SUB_2_CLAW_CLOSE,
+    SUB_2_LIFT_TOP,
+    /* 按3: 横移 P3 */
+    SUB_3_MOVE_P3,
+    /* 按4: 降放货 */
+    SUB_4_DOWN_PLACE,
+    /* 按5: 爪松开 -> 升顶 */
+    SUB_5_CLAW_OPEN,
+    SUB_5_LIFT_TOP,
+    /* 按6: 横移回原点 -> 降底部 */
+    SUB_6_MOVE_HOME,
+    SUB_6_DOWN_BOTTOM,
+} crane_sub_t;
+
+static uint8_t     flow_step = 0U;       /* 已触发的大步骤数 0..6 */
+static crane_sub_t flow_sub  = SUB_DONE; /* 当前步骤内的子阶段 */
+
+/* 龙门到位:左右两个电机都进容差才算到位(单判一侧会让漂移/落后的另一侧被忽略) */
+static uint8_t GantryReached(int32_t tol)
+{
+    return (Axis_IsReached(AXIS_GANTRY_L, tol) && Axis_IsReached(AXIS_GANTRY_R, tol));
+}
+
+/* 按键:推进到下一个大步骤。仅当上一步骤的自动接续已跑完(flow_sub==SUB_DONE)才响应,
+ * 避免中途打断。走完第6步后再按 -> 从头重来。 */
+void CraneFlow_Step(void)
+{
+    if (!MotorControl_IsEnabled())
+    {
+        MotorControl_Enable();           /* 首次按下先使能(各轴轨迹同步到实测位置) */
+    }
+
+    if (flow_sub != SUB_DONE)
+    {
+        return;                          /* 上一步骤还在自动接续,忽略本次按键 */
+    }
+
+    if (flow_step >= 6U)
+    {
+        flow_step = 0U;                  /* 整套结束后再按 -> 从头 */
+    }
+
+    flow_step++;
+    switch (flow_step)
+    {
+        case 1U: set_z(Z_TOP);                       flow_sub = SUB_1_LIFT_TOP;  break; /* 升顶->横移P0 */
+        case 2U: set_z(FLOW_Z_LEVEL3);               flow_sub = SUB_2_DOWN_L3;   break; /* 降三层->夹->升顶 */
+        case 3U: Axis_SetTargetXGantry(X_CAL_POINT3);flow_sub = SUB_3_MOVE_P3;   break; /* 横移P3 */
+        case 4U: set_z(FLOW_Z_PLACE);                flow_sub = SUB_4_DOWN_PLACE;break; /* 降放货 */
+        case 5U: ClawOpen();                         flow_sub = SUB_5_CLAW_OPEN; break; /* 松开->升顶 */
+        case 6U: Axis_SetTargetXGantry(FLOW_X_HOME); flow_sub = SUB_6_MOVE_HOME; break; /* 回原点->降底 */
+        default: break;
+    }
+}
+
+/* 每控制周期调用:处理大步骤内部"到位后自动接续"。跑到子序列末尾 -> SUB_DONE 等下一次按键。 */
+void CraneFlow_Tick(void)
+{
+    switch (flow_sub)
+    {
+        /* 按1 */
+        case SUB_1_LIFT_TOP:
+            if (Z_IsReached(FLOW_TOL_Z)) { Axis_SetTargetXGantry(X_CAL_POINT0); flow_sub = SUB_1_MOVE_P0; }
+            break;
+        case SUB_1_MOVE_P0:
+            if (GantryReached(FLOW_TOL_X)) { flow_sub = SUB_DONE; }
+            break;
+
+        /* 按2 */
+        case SUB_2_DOWN_L3:
+            if (Z_IsReached(FLOW_TOL_Z)) { ClawClose(); flow_sub = SUB_2_CLAW_CLOSE; }
+            break;
+        case SUB_2_CLAW_CLOSE:
+            if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW)) { set_z(Z_TOP); flow_sub = SUB_2_LIFT_TOP; }
+            break;
+        case SUB_2_LIFT_TOP:
+            if (Z_IsReached(FLOW_TOL_Z)) { flow_sub = SUB_DONE; }
+            break;
+
+        /* 按3 */
+        case SUB_3_MOVE_P3:
+            if (GantryReached(FLOW_TOL_X)) { flow_sub = SUB_DONE; }
+            break;
+
+        /* 按4 */
+        case SUB_4_DOWN_PLACE:
+            if (Z_IsReached(FLOW_TOL_Z)) { flow_sub = SUB_DONE; }
+            break;
+
+        /* 按5 */
+        case SUB_5_CLAW_OPEN:
+            if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW)) { set_z(Z_TOP); flow_sub = SUB_5_LIFT_TOP; }
+            break;
+        case SUB_5_LIFT_TOP:
+            if (Z_IsReached(FLOW_TOL_Z)) { flow_sub = SUB_DONE; }
+            break;
+
+        /* 按6 */
+        case SUB_6_MOVE_HOME:
+            if (GantryReached(FLOW_TOL_X)) { set_z(FLOW_Z_BOTTOM); flow_sub = SUB_6_DOWN_BOTTOM; }
+            break;
+        case SUB_6_DOWN_BOTTOM:
+            if (Z_IsReached(FLOW_TOL_Z)) { flow_sub = SUB_DONE; }
+            break;
+
+        case SUB_DONE:
+        default:
+            break;                       /* 等按键 */
     }
 }
 
