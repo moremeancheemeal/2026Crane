@@ -88,7 +88,7 @@ extern moto_measure_t Motor[MOTOR_NUM];  /* CAN 回传的电机原始数据 */
 #define X_CAL_POINT3   (1860000)
 
 /* vofa 监视:选要画曲线的轴(实际速度/目标速度/实际位置/目标位置 4 通道) */
-#define VOFA_WATCH_AXIS    AXIS_GANTRY_L
+#define VOFA_WATCH_AXIS    AXIS_LIFT_Z
 /* vofa 上报分频:控制循环 500Hz,每 2 周期发一帧 => 250Hz */
 #define VOFA_REPORT_DIVIDER   2
 
@@ -100,6 +100,9 @@ void    Axis_SetTarget(axis_id_t id, int32_t target);/* 设某轴最终目标,�
 void    Axis_SetTargetXGantry(int32_t x);            /* 同时给 GANTRY_L/R 同一 X 目标(同步) */
 int32_t Axis_GetPos(axis_id_t id);                   /* 读某轴实测位置(dir 校正,counts) */
 uint8_t Axis_IsBusy(axis_id_t id);                   /* 某轴是否正在跑轨迹 */
+/* 某轴是否"真正到位":轨迹已走完(!busy) 且 实测位置进了 ±tol_counts 容差。
+ * 非阻塞,主循环里轮询即可。tol_counts 取几百~几千,看精度要求。 */
+uint8_t Axis_IsReached(axis_id_t id, int32_t tol_counts);
 
 void    MotorControl_Enable(void);                   /* 同步所有轴到实测位置 + 清 PID + 使能 */
 void    MotorControl_Stop(void);                     /* 失能,电流清零 */
@@ -109,5 +112,19 @@ void    MotorSysTask(void);                          /* 每控制周期:推进�
 void    MotorPidCalc(void);                          /* 双环 PID(遍历所有轴) */
 void    DataCanSend(void);                           /* 把各轴速度环输出装帧发 CAN */
 void    MotorVofaReport(void);                       /* vofa 上报 VOFA_WATCH_AXIS 的 4 通道 */
+
+/* 龙门四点位测试:按键每按一次推进一步(交替 使能去下一点 / 失能),
+ * 用 Axis_SetTargetXGantry 同步驱动左右两个龙门电机。由按键回调调用。 */
+void    GantryFourPointStep(void);
+
+/* ---- Z 升降轴上层封装(在 Axis_* 之上再包一层,用"高度 counts"指挥) ----
+ * 高度 = 相对上电位置的 counts;上电位置 = Z0(电机 total_angle 上电归零)。
+ * 方向:负 = 上升(机械实际方向决定,set_z 不做内部翻转,你传什么符号就是什么)。 */
+void    set_z(int32_t z_counts);          /* 设 Z 目标高度,内部走 S 曲线平滑升降 */
+int32_t Z_GetHeight(void);                /* 读当前 Z 实际高度(counts) */
+uint8_t Z_IsReached(int32_t tol_counts);  /* Z 是否到位(非阻塞,轨迹走完且进容差) */
+
+/* Z 升降高度测试:按键交替式推进(三层->二层->一层->放货->回零,循环)。由按键回调调用。 */
+void    ZHeightStep(void);
 
 #endif
