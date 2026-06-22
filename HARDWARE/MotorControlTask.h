@@ -64,8 +64,6 @@ typedef struct
     float    spd_kp, spd_ki, spd_kd;
     uint32_t spd_max;       /* 速度环输出限幅(= 电流上限) */
     uint32_t spd_ilim;      /* 速度环积分限幅 */
-
-    float    spd_scale;     /* 速度环参考额外缩放(原 CLAW_SPEED_SCALE,一般 1.0) */
 } axis_cfg_t;
 
 /* 一个轴的运行态(取代原来散落的全局) */

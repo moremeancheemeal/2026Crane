@@ -13,8 +13,7 @@
  *   can_index, dir, reduction,
  *   vmax_rpm, amax_rpm, jmax_rpm,
  *   pos_kp, pos_ki, pos_kd, pos_max, pos_ilim,
- *   spd_kp, spd_ki, spd_kd, spd_max, spd_ilim,
- *   spd_scale
+ *   spd_kp, spd_ki, spd_kd, spd_max, spd_ilim
  * ============================================================================ */
 axis_cfg_t axis_cfg[AXIS_NUM] =
 {
@@ -22,43 +21,37 @@ axis_cfg_t axis_cfg[AXIS_NUM] =
     { 0, -1, MOTOR_REDUCTION_RATIO_3508,
       350.0f, 305.0f, 3052.0f,
       0.004f, 0.0f, 0.0f, 170u, 10u,
-      12.0f, 0.15f, 2.0f, 15000u, 500u,
-      1.0f },
+      12.0f, 0.15f, 2.0f, 15000u, 500u },
 
     /* AXIS_GANTRY_R (0x202) 龙门右,X —— 与左对称安装,dir 取 +1 */
     { 1, +1, MOTOR_REDUCTION_RATIO_3508,
       350.0f, 305.0f, 3052.0f,
       0.004f, 0.0f, 0.0f, 170u, 10u,
-      12.0f, 0.15f, 2.0f, 15000u, 500u,
-      1.0f },
+      12.0f, 0.15f, 2.0f, 15000u, 500u },
 
     /* AXIS_SLIDE_Y (0x203) 滑行,Y —— 高速 */
     { 2, +1, MOTOR_REDUCTION_RATIO_3508,
       300.0f, 1200.0f, 6000.0f,
       0.004f, 0.0f, 0.0f, 170u, 10u,
-      12.0f, 0.15f, 2.0f, 15000u, 500u,
-      1.0f },
+      12.0f, 0.15f, 2.0f, 15000u, 500u },
 
     /* AXIS_LIFT_Z (0x204) 升降,Z —— 小行程柔和;Vmax 测试改 100 RPM */
     { 3, +1, MOTOR_REDUCTION_RATIO_3508,
       100.0f, 240.0f, 1500.0f,
       0.004f, 0.0f, 0.0f, 100u, 10u,
-      12.0f, 0.15f, 2.0f, 15000u, 500u,
-      1.0f },
+      12.0f, 0.15f, 2.0f, 15000u, 500u },
 
     /* AXIS_YAW (0x205) 旋转,Yaw —— 慢稳 */
     { 4, +1, MOTOR_REDUCTION_RATIO_3508,
       100.0f, 200.0f, 1200.0f,
       0.004f, 0.0f, 0.0f, 100u, 10u,
-      12.0f, 0.15f, 2.0f, 15000u, 500u,
-      1.0f },
+      12.0f, 0.15f, 2.0f, 15000u, 500u },
 
-    /* AXIS_CLAW (0x206) 爪子 —— 中等(原 CLAW_SPEED_SCALE=5 用 spd_scale 体现) */
+    /* AXIS_CLAW (0x206) 爪子 —— 速度由本行 vmax_rpm 单独设定 */
     { 5, +1, MOTOR_REDUCTION_RATIO_3508,
       350.0f, 305.0f, 3052.0f,
       0.004f, 0.0f, 0.0f, 100u, 10u,
-      12.0f, 0.15f, 2.0f, 15000u, 500u,
-      5.0f },
+      12.0f, 0.15f, 2.0f, 15000u, 500u },
 };
 
 axis_t          axis[AXIS_NUM];
@@ -389,7 +382,7 @@ void MotorPidCalc(void)
                  ref);
         pid_calc(&axis[i].pid_spd,
                  (float)(c->dir * Motor[c->can_index].speed_rpm),
-                 axis[i].pid_pos.pos_out * c->reduction * c->spd_scale + ff);
+                 axis[i].pid_pos.pos_out * c->reduction + ff);
     }
 }
 
