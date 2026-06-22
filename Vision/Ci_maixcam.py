@@ -48,11 +48,14 @@ SERVO_DEG = [
 # 0~4 = 只停在指定位置（方便单独调试该位置的舵机角度）
 DEBUG_STEP = -1
 
-
 # ======================== 连接WiFi ========================
 print("[WIFI] 连接上位机热点...")
 wifi = network.wifi.Wifi()
-wifi.connect(WIFI_SSID, WIFI_PASSWD)
+
+wifi.disconnect()
+maix_time.sleep_ms(11)
+print("断开一下\n")
+wifi.connect(WIFI_SSID, WIFI_PASSWD, timeout=2)
 print(f"[WIFI] 已连接")
 
 
