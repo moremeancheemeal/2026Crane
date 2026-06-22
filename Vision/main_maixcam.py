@@ -27,9 +27,9 @@ WIFI_PASSWD  = "12345678"      # 热点密码(至少8位)
 WIFI_CHANNEL = 6               # WiFi信道
 
 # 网络配置
-TCP_IP   = "0.0.0.0"           # TCP监听所有网卡
+TCP_IP   = "0.0.0.0"
 TCP_PORT = 9090
-AP_IP    = "192.168.66.1"      # AP默认IP(start_ap的默认参数)
+AP_IP    = "192.168.66.1"      # AP默认IP，下位机需要连接这个地址
 
 # UART 配置
 UART_PORT = "/dev/ttyS0"
@@ -39,12 +39,9 @@ UART_BAUD = 115200
 CLASSIFIER_PATH = "/root/my_classes.bin"
 MODEL_PATH      = "/root/models/mobilenet_v2_no_top.mud"
 
-# 映射: index → 含义 (按官方App创建顺序)
-#   idx 0 → 1 = 黄(yellow)
-#   idx 1 → 2 = 绿(green)
-#   idx 2 → 3 = 白(white)
+# 映射: index → 含义
 IDX_TO_NAME = {0: "yellow", 1: "green", 2: "white"}
-REQUIRED    = 3   # 累计3次分类后触发匹配
+REQUIRED    = 3
 
 # ======================== 初始化 WiFi AP ========================
 print("[WIFI] 启动 AP 模式...")
@@ -80,14 +77,14 @@ except Exception as e:
 cam  = camera.Camera(clf.input_width(), clf.input_height(), clf.input_format())
 disp = display.Display()
 
-IW = clf.input_width()    # 图像宽度(如224)
-IH = clf.input_height()   # 图像高度(如224)
-DW = disp.width()         # 屏幕宽度(如320)
-DH = disp.height()        # 屏幕高度(如240)
+IW = clf.input_width()
+IH = clf.input_height()
+DW = disp.width()
+DH = disp.height()
 
 print(f"[INIT] 图像:{IW}x{IH} 屏幕:{DW}x{DH}")
 
-# 加载中文字体
+# 加载字体
 try:
     image.load_font("zh", "/maixapp/share/font/ppocr_keys_v1.ttf", size=20)
     image.set_default_font("zh")
@@ -95,7 +92,6 @@ except:
     pass
 
 # ======================== UI 工具 ========================
-# 按钮位置和大小(图像坐标系，显示时会自动缩放到屏幕)
 BTN_W = int(IW * 0.5)
 BTN_H = int(IH * 0.12)
 BTN_X = (IW - BTN_W) // 2
@@ -103,17 +99,12 @@ BTN_Y = IH - BTN_H - 15
 
 
 def hit_btn(tx, ty):
-    """
-    检测触摸点是否落在按钮区域内
-    tx, ty 是屏幕坐标，需要转换到图像坐标再比较
-    """
     ix = int(tx * IW / DW)
     iy = int(ty * IH / DH)
     return BTN_X <= ix <= BTN_X + BTN_W and BTN_Y <= iy <= BTN_Y + BTN_H
 
 
 def draw_btn(img, text, color=image.COLOR_WHITE):
-    """在固定位置画一个按钮(矩形框 + 居中文字)"""
     img.draw_rect(BTN_X, BTN_Y, BTN_W, BTN_H, color, 2)
     tw = len(text) * 12
     tx = BTN_X + (BTN_W - tw) // 2
@@ -154,9 +145,9 @@ class State:
     def __init__(self):
         self._l = threading.Lock()
         self.running = True
-        self.conn    = None                # 下位机socket连接
-        self.ocr     = None                # 下位机返回的OCR结果
-        self.evt     = threading.Event()   # 等待OCR结果的事件
+        self.conn = None
+        self.ocr  = None
+        self.evt  = threading.Event()
 
     def set_conn(self, c):
         with self._l:
@@ -169,11 +160,9 @@ class State:
 
 st = State()
 
+
 # ======================== TCP 通信 ========================
-
-
 def tcp_send(msg):
-    """向下位机发送消息"""
     c = st.get_conn()
     if not c:
         return False
@@ -186,7 +175,6 @@ def tcp_send(msg):
 
 
 def _tcp_recv(conn):
-    """TCP接收循环(运行在独立线程)"""
     buf = ""
     conn.settimeout(1)
     while st.running:
@@ -210,7 +198,6 @@ def _tcp_recv(conn):
 
 
 def _handle_tcp(msg):
-    """处理下位机发来的消息"""
     if msg == "CONNECTED":
         print("[TCP] 下位机已连接")
     elif msg.startswith("RESULTS:"):
@@ -224,7 +211,6 @@ def _handle_tcp(msg):
         st.ocr = r
         st.evt.set()
     elif msg == "SCANNING":
-        # 下位机还在扫描中，通知上位机"还没好"
         st.ocr = None
         st.evt.set()
     elif msg.startswith("ACK:"):
@@ -232,7 +218,6 @@ def _handle_tcp(msg):
 
 
 def tcp_server():
-    """TCP服务端(运行在独立线程)，等待下位机连接"""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((TCP_IP, TCP_PORT))
@@ -254,11 +239,6 @@ def tcp_server():
 
 # ======================== 匹配函数 ========================
 def match_fn(classes, ocr):
-    """
-    classes: [2, 1, 3]        — 3次分类编号
-    ocr:     [3, 1, 5, 2, 4]  — 5个位置的OCR编号
-    返回:    [4, 2, 1]        — 每个分类在OCR第几位(1-indexed, 0=未找到)
-    """
     res = []
     for c in classes:
         pos = 0
@@ -271,10 +251,10 @@ def match_fn(classes, ocr):
 
 
 # ======================== UI 状态常量 ========================
-STEP_IDLE     = 0   # 待机: 显示连接状态 + "START"按钮
-STEP_CLASSIFY = 1   # 分类: 显示进度 + "REC"按钮
-STEP_MATCHING = 2   # 匹配: 阻塞查询下位机
-STEP_RESULT   = 3   # 结果: 显示匹配结果 + "RESET"按钮
+STEP_IDLE     = 0
+STEP_CLASSIFY = 1
+STEP_MATCHING = 2
+STEP_RESULT   = 3
 
 
 # ======================== 启动 ========================
@@ -287,43 +267,38 @@ print(f"[SYS] 请将下位机 UPPER_IP 设为: {AP_IP}")
 
 # UI 变量
 step = STEP_IDLE
-cls_list = []           # 已完成的分类结果
-cls_count = 0           # 已分类次数
-match_result = None     # 最终匹配结果
-ocr_result = None       # 下位机OCR结果
-status_msg = ""         # 屏幕状态提示
-prev_pressed = False    # 上一帧触摸状态(边缘检测用)
+cls_list = []
+cls_count = 0
+match_result = None
+ocr_result = None
+status_msg = ""
+prev_pressed = False
 
 # ======================== 主循环 ========================
 while st.running and not app.need_exit():
 
-    # ---- 1. 读取触摸 ----
     try:
         tx, ty, pressed = touch.read()
     except:
         tx, ty, pressed = 0, 0, False
 
-    # 边缘检测: 只在按下瞬间触发一次
     pressed_edge = pressed and not prev_pressed
     prev_pressed = pressed
 
-    # ---- 2. 读取UART ----
     uart_cmd = uart_read()
 
-    # ---- 3. 获取摄像头画面(作为UI底图) ----
     img = cam.read()
 
     # ============================================================
-    #                    STEP_IDLE  待机状态
+    #                    STEP_IDLE  待机
     # ============================================================
     if step == STEP_IDLE:
         connected = st.get_conn() is not None
 
         if connected:
             img.draw_string(10, 10, "Slave: OK", image.COLOR_GREEN)
-            draw_btn(img, "START", image.COLOR_CYAN)
+            draw_btn(img, "START", image.COLOR_GRAY)
 
-            # 点击 START 按钮
             if pressed_edge and hit_btn(tx, ty):
                 if tcp_send("START"):
                     cls_list = []
@@ -339,19 +314,17 @@ while st.running and not app.need_exit():
             img.draw_string(10, 10, "Slave: --", image.COLOR_RED)
             img.draw_string(10, 28, "Waiting...", image.COLOR_GRAY)
 
-        # 显示WiFi信息
         img.draw_string(10, IH - 45, f"AP:{WIFI_SSID}", image.COLOR_YELLOW)
 
         if status_msg:
             img.draw_string(10, IH - 65, status_msg, image.COLOR_YELLOW)
 
     # ============================================================
-    #                  STEP_CLASSIFY  分类状态
+    #                  STEP_CLASSIFY  分类
     # ============================================================
     elif step == STEP_CLASSIFY:
-        img.draw_string(10, 10, f"Item {cls_count+1}/{REQUIRED}", image.COLOR_CYAN)
+        img.draw_string(10, 10, f"Item {cls_count+1}/{REQUIRED}", image.COLOR_GRAY)
 
-        # 显示已有的分类结果
         for idx, c in enumerate(cls_list):
             name = IDX_TO_NAME.get(c - 1, "?")
             img.draw_string(10, 30 + idx * 18, f"#{idx+1}: {name}", image.COLOR_GREEN)
@@ -359,13 +332,12 @@ while st.running and not app.need_exit():
         if status_msg:
             img.draw_string(10, 30 + cls_count * 18 + 5, status_msg, image.COLOR_YELLOW)
 
-        draw_btn(img, f"REC {cls_count+1}", image.COLOR_CYAN)
+        draw_btn(img, f"REC {cls_count+1}", image.COLOR_GRAY)
 
-        # 点击识别按钮
         if pressed_edge and hit_btn(tx, ty):
             try:
                 idx, score = clf.classify(img)
-                cls_num = idx + 1          # idx → num
+                cls_num = idx + 1
                 cls_list.append(cls_num)
                 cls_count += 1
                 name = IDX_TO_NAME.get(idx, "?")
@@ -375,14 +347,13 @@ while st.running and not app.need_exit():
 
                 if cls_count >= REQUIRED:
                     step = STEP_MATCHING
-                    print("[UI] 3次分类完成, 进入匹配")
+                    print("[UI] 3次完成, 进入匹配")
             except Exception as e:
                 status_msg = f"ERR:{e}"
                 print(f"[识别] 错误: {e}")
 
     # ============================================================
-    #                  STEP_MATCHING  匹配状态
-    #  (阻塞: 轮询QUERY等下位机扫描完成，期间持续刷新屏幕)
+    #                  STEP_MATCHING  匹配
     # ============================================================
     elif step == STEP_MATCHING:
         if not st.get_conn():
@@ -395,10 +366,9 @@ while st.running and not app.need_exit():
                 if not st.running:
                     break
 
-                # 每次轮询都刷新屏幕，显示进度
                 img2 = cam.read()
                 img2.draw_string(10, 10, "Matching...", image.COLOR_YELLOW)
-                img2.draw_string(10, 30, f"Query {attempt+1}/30", image.COLOR_CYAN)
+                img2.draw_string(10, 30, f"Query {attempt+1}/30", image.COLOR_GRAY)
                 for idx, c in enumerate(cls_list):
                     name = IDX_TO_NAME.get(c - 1, "?")
                     img2.draw_string(10, 50 + idx * 18, f"#{idx+1}: {name}", image.COLOR_GREEN)
@@ -411,18 +381,15 @@ while st.running and not app.need_exit():
 
                 if st.evt.wait(timeout=2):
                     if st.ocr is not None:
-                        # 拿到有效结果
                         ocr_result = st.ocr
                         got = True
-                        print(f"[匹配] 第{attempt+1}次QUERY拿到结果: {ocr_result}")
+                        print(f"[匹配] 第{attempt+1}次QUERY拿到: {ocr_result}")
                         break
                     else:
-                        # SCANNING，还在扫描中
                         print(f"[匹配] 第{attempt+1}次: 扫描中...")
                 else:
                     print(f"[匹配] 第{attempt+1}次: 超时重试")
 
-            # 处理匹配结果
             if got and ocr_result is not None:
                 m = match_fn(cls_list, ocr_result)
                 cls_s = ",".join(str(c) for c in cls_list)
@@ -436,7 +403,7 @@ while st.running and not app.need_exit():
                 print(f"\n{'='*48}")
                 print(f"  CLS:   [{cls_s}]")
                 print(f"  OCR:   [{ocr_s}]")
-                print(f"  MATCH: [{mat_s}]  (0=not found)")
+                print(f"  MATCH: [{mat_s}]")
                 print(f"{'='*48}\n")
             else:
                 match_result = None
@@ -447,20 +414,19 @@ while st.running and not app.need_exit():
             step = STEP_RESULT
 
     # ============================================================
-    #                   STEP_RESULT  结果状态
+    #                   STEP_RESULT  结果
     # ============================================================
     elif step == STEP_RESULT:
         if match_result:
             img.draw_string(10, 10, f"CLS: [{match_result['cls']}]", image.COLOR_GREEN)
             img.draw_string(10, 30, f"OCR: [{match_result['ocr']}]", image.COLOR_GREEN)
-            img.draw_string(10, 50, f"MATCH: [{match_result['match']}]", image.COLOR_CYAN)
+            img.draw_string(10, 50, f"MATCH: [{match_result['match']}]", image.COLOR_GRAY)
         else:
             img.draw_string(10, 10, "Match failed!", image.COLOR_RED)
             img.draw_string(10, 30, status_msg, image.COLOR_YELLOW)
 
         draw_btn(img, "RESET", image.COLOR_WHITE)
 
-        # 点击重置按钮
         if pressed_edge and hit_btn(tx, ty):
             step = STEP_IDLE
             cls_list = []
@@ -494,7 +460,6 @@ while st.running and not app.need_exit():
         else:
             uart_write(f"UNKNOWN:{cmd}")
 
-    # ---- 刷新屏幕 ----
     disp.show(img)
 
 # ======================== 退出清理 ========================
