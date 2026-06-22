@@ -47,17 +47,10 @@ void AllTask(void)
     }
     key_scan_cnt = 0;
 
-    /* 按键暂作"使能/失能"切换。机械臂上层运动逻辑(用 Axis_SetTarget /
-     * Axis_SetTargetXGantry 给各轴目标)以后再接入。 */
+    /* Z 升降高度测试:按键每按一次推进一步,交替"使能去下一高度 / 失能"。
+     * 高度序列:三层 -> 二层 -> 一层 -> 放货 -> 回零,走完循环。 */
     if (KeyPressed(ABOARD_POS_KEY_PORT, ABOARD_POS_KEY_PIN, &pos_key_last))
     {
-        if (MotorControl_IsEnabled())
-        {
-            MotorControl_Stop();
-        }
-        else
-        {
-            MotorControl_Enable();
-        }
+        ZHeightStep();
     }
 }
