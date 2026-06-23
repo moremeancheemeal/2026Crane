@@ -42,6 +42,7 @@ REQUIRED    = 3   # 需要分类3次
 
 # OCR配置
 FRAMES_PER_CLASSIFY = 30   # 每次分类采集30帧投票
+N_STEPS             = 5    # 下位机扫描位置数（与Ci_maixcam一致）
 
 # ======================== 初始化 WiFi AP ========================
 print("[WIFI] 启动 AP 模式...")
@@ -60,6 +61,31 @@ try:
 except Exception as e:
     print(f"[UART] 失败: {e}")
     uart_ok = False
+
+# UART接收回调（根据MaixPy官方文档，使用set_received_callback方式接收）
+_uart_buf = ""
+_uart_lock = threading.Lock()
+_uart_lines = []
+
+
+def _uart_on_received(serial, data):
+    """UART接收回调函数（在另一个线程中调用，分类期间不会丢失数据）"""
+    global _uart_buf
+    try:
+        text = data.decode("utf-8", errors="ignore")
+        with _uart_lock:
+            _uart_buf += text
+            while "\n" in _uart_buf:
+                line, _uart_buf = _uart_buf.split("\n", 1)
+                line = line.strip()
+                if line:
+                    _uart_lines.append(line)
+    except:
+        pass
+
+
+if uart_ok:
+    ser.set_received_callback(_uart_on_received)
 
 # ======================== 初始化触摸屏 ========================
 touch = touchscreen.TouchScreen()
@@ -113,29 +139,20 @@ def draw_btn(img, text, color=image.COLOR_WHITE):
 
 
 # ======================== UART 工具 ========================
-_uart_buf = ""
-
-
 def uart_read():
-    global _uart_buf
-    if not uart_ok:
-        return None
-    data = ser.read()
-    if data:
-        _uart_buf += data.decode("utf-8", errors="ignore")
-    while "\n" in _uart_buf:
-        line, _uart_buf = _uart_buf.split("\n", 1)
-        line = line.strip()
-        if line:
-            return line
+    """从回调接收队列中取出一行数据（非阻塞）"""
+    with _uart_lock:
+        if _uart_lines:
+            return _uart_lines.pop(0)
     return None
 
 
 def uart_write(msg):
+    """发送字符串到UART（使用官方推荐的write_str方法）"""
     if not uart_ok:
         return
     try:
-        ser.write((msg + "\n").encode())
+        ser.write_str(msg + "\n")
     except:
         pass
 
@@ -257,19 +274,28 @@ def match_fn(classes, ocr):
 
 
 # ======================== 多帧投票分类 ========================
-def vote_classify(img, frames=30):
+def vote_classify(frames=30):
     """
-    对当前画面进行多帧分类投票，返回最可靠的结果
+    对当前画面进行多帧分类投票，返回最可靠的结果。
+    每帧都从摄像头读取新画面，避免对同一帧重复分类。
     """
     results = []
     for f in range(frames):
+        frame = cam.read()
         try:
-            idx, score = clf.classify(img)
-            results.append(idx + 1)  # 转换为1-based class编号
+            res = clf.classify(frame)     # 返回list: [(index, score), ...]
+            if res:
+                idx, score = res[0]       # 取最佳匹配，idx是0-based
+                results.append(idx + 1)   # 转换为1-based: 0→1, 1→2, 2→3
+            else:
+                results.append(None)
         except:
             results.append(None)
+        # 每10帧显示进度
         if (f + 1) % 10 == 0:
             print(f"  [分类] 第{f+1}/{frames}帧")
+            frame.draw_string(10, 10, f"Classifying {f+1}/{frames}...", image.COLOR_YELLOW)
+            disp.show(frame)
     
     # 投票
     valid = [v for v in results if v is not None]
@@ -385,8 +411,8 @@ while st.running and not app.need_exit():
         img.draw_string(10, 28, "Please wait...", image.COLOR_GRAY)
         disp.show(img)
         
-        # 执行30帧投票分类
-        result, confidence = vote_classify(img, FRAMES_PER_CLASSIFY)
+        # 执行30帧投票分类（函数内部每帧都读取新画面）
+        result, confidence = vote_classify(FRAMES_PER_CLASSIFY)
         
         if result is not None:
             cls_list.append(result)
@@ -394,10 +420,10 @@ while st.running and not app.need_exit():
             name = IDX_TO_NAME.get(result - 1, "?")
             status_msg = f"#{cls_count}: {name} ({confidence:.1%})"
             print(f"[分类] 第{cls_count}次: class{result}({name}) 置信度={confidence:.1%}")
-            
-            # 通知STM32分类完成
-            uart_write(f"CLASS:{result}")
-            
+
+            # 通知STM32本次分类完成
+            uart_write("SDONE")
+
             if cls_count >= REQUIRED:
                 # 3次分类完成，进入匹配
                 step = STEP_MATCHING
@@ -450,23 +476,28 @@ while st.running and not app.need_exit():
                     print(f"[匹配] 第{attempt+1}次: 超时重试")
 
             if got and ocr_result is not None:
-                m = match_fn(cls_list, ocr_result)
-                cls_s = ",".join(str(c) for c in cls_list)
-                ocr_s = ",".join(str(v) if v else "X" for v in ocr_result)
-                mat_s = ",".join(str(v) for v in m)
+                if len(ocr_result) != N_STEPS:
+                    status_msg = f"OCR len={len(ocr_result)} != {N_STEPS}"
+                    print(f"[匹配] OCR结果长度错误: {ocr_result}")
+                    match_result = None
+                else:
+                    m = match_fn(cls_list, ocr_result)
+                    cls_s = ",".join(str(c) for c in cls_list)
+                    ocr_s = ",".join(str(v) if v else "X" for v in ocr_result)
+                    mat_s = ",".join(str(v) for v in m)
 
-                match_result = {"cls": cls_s, "ocr": ocr_s, "match": mat_s}
-                status_msg = f"MATCH:{mat_s}"
-                
-                # 发送结果给STM32
-                uart_write(f"MATCH:{mat_s}")
+                    match_result = {"cls": cls_s, "ocr": ocr_s, "match": mat_s}
+                    status_msg = f"MATCH:{mat_s}"
+                    
+                    # 发送结果给STM32
+                    uart_write(f"MATCH:{mat_s}")
 
-                print(f"\n{'='*48}")
-                print(f"  CLS:   [{cls_s}]")
-                print(f"  OCR:   [{ocr_s}]")
-                print(f"  MATCH: [{mat_s}]")
-                print(f"{'='*48}\n")
-            else:
+                    print(f"\n{'='*48}")
+                    print(f"  CLS:   [{cls_s}]")
+                    print(f"  OCR:   [{ocr_s}]")
+                    print(f"  MATCH: [{mat_s}]")
+                    print(f"{'='*48}\n")
+            if match_result is None:
                 match_result = None
                 if not status_msg:
                     status_msg = "No OCR result"
