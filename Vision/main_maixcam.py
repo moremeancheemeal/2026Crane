@@ -1,16 +1,13 @@
 # ============================================================
-#  upper_main.py — 主上位机 MaixCAM
+#  main_maixcam.py — 主上位机 MaixCAM
 #  WiFi AP热点 + 触摸屏按钮 + 自学习分类 + TCP服务端 + UART通信
 #
 #  流程:
 #    1. 上电 → 启动WiFi AP → 初始化 → TCP监听
 #    2. 下位机连上WiFi + TCP → 屏幕显示"START"按钮
-#    3. 点击"START" → 发START给下位机 → 进入3轮分类
-#    4. 每轮: "REC"按钮 → 用户放物品 → 点击 → 分类
-#    5. 3轮完成 → 查询下位机OCR结果 → 匹配
-#    6. 显示结果 + "RESET"按钮 → 点击回到步骤2
-#
-#  同时保留UART命令作为备用控制方式
+#    3. 点击"START" → TCP发START给下位机 + 串口发"start"给STM32
+#    4. 等待STM32发送"s" → 每次收到s进行30帧分类 → 3次后请求下位机结果
+#    5. 下位机返回OCR结果 → 匹配 → 发送结果给STM32 → 结束
 # ============================================================
 
 import socket
@@ -41,7 +38,10 @@ MODEL_PATH      = "/root/models/mobilenet_v2_no_top.mud"
 
 # 映射: index → 含义
 IDX_TO_NAME = {0: "yellow", 1: "green", 2: "white"}
-REQUIRED    = 3
+REQUIRED    = 3   # 需要分类3次
+
+# OCR配置
+FRAMES_PER_CLASSIFY = 30   # 每次分类采集30帧投票
 
 # ======================== 初始化 WiFi AP ========================
 print("[WIFI] 启动 AP 模式...")
@@ -239,6 +239,12 @@ def tcp_server():
 
 # ======================== 匹配函数 ========================
 def match_fn(classes, ocr):
+    """
+    计算每个分类结果在OCR结果中第一次出现的位置（1-based）
+    例如: classes=[2,1,3], ocr=[5,3,1,2,4] 
+    2在ocr的位置=4, 1在ocr的位置=3, 3在ocr的位置=2
+    结果: [4,3,2]
+    """
     res = []
     for c in classes:
         pos = 0
@@ -250,11 +256,41 @@ def match_fn(classes, ocr):
     return res
 
 
+# ======================== 多帧投票分类 ========================
+def vote_classify(img, frames=30):
+    """
+    对当前画面进行多帧分类投票，返回最可靠的结果
+    """
+    results = []
+    for f in range(frames):
+        try:
+            idx, score = clf.classify(img)
+            results.append(idx + 1)  # 转换为1-based class编号
+        except:
+            results.append(None)
+        if (f + 1) % 10 == 0:
+            print(f"  [分类] 第{f+1}/{frames}帧")
+    
+    # 投票
+    valid = [v for v in results if v is not None]
+    if not valid:
+        return None, 0
+    
+    count = {}
+    for v in valid:
+        count[v] = count.get(v, 0) + 1
+    winner = max(count, key=count.get)
+    confidence = count[winner] / len(valid)
+    
+    return winner, confidence
+
+
 # ======================== UI 状态常量 ========================
 STEP_IDLE     = 0
-STEP_CLASSIFY = 1
-STEP_MATCHING = 2
-STEP_RESULT   = 3
+STEP_WAIT_S   = 1   # 等待STM32发送"s"
+STEP_CLASSIFY = 2   # 分类中
+STEP_MATCHING = 3   # 匹配中
+STEP_RESULT   = 4   # 显示结果
 
 
 # ======================== 启动 ========================
@@ -267,10 +303,10 @@ print(f"[SYS] 请将下位机 UPPER_IP 设为: {AP_IP}")
 
 # UI 变量
 step = STEP_IDLE
-cls_list = []
-cls_count = 0
-match_result = None
-ocr_result = None
+cls_list = []          # 分类结果数组，如[2,1,3]
+cls_count = 0          # 当前分类次数
+match_result = None    # 匹配结果
+ocr_result = None      # OCR结果
 status_msg = ""
 prev_pressed = False
 
@@ -300,14 +336,19 @@ while st.running and not app.need_exit():
             draw_btn(img, "START", image.COLOR_GRAY)
 
             if pressed_edge and hit_btn(tx, ty):
+                # 发送START给下位机
                 if tcp_send("START"):
+                    # 发送"start"给STM32
+                    uart_write("start")
+                    
+                    # 初始化
                     cls_list = []
                     cls_count = 0
                     match_result = None
                     ocr_result = None
                     status_msg = ""
-                    step = STEP_CLASSIFY
-                    print("[UI] START sent, entering classify")
+                    step = STEP_WAIT_S
+                    print("[UI] START sent, waiting for STM32 's'")
                 else:
                     status_msg = "TCP send fail!"
         else:
@@ -320,37 +361,55 @@ while st.running and not app.need_exit():
             img.draw_string(10, IH - 65, status_msg, image.COLOR_YELLOW)
 
     # ============================================================
+    #                  STEP_WAIT_S  等待STM32发送"s"
+    # ============================================================
+    elif step == STEP_WAIT_S:
+        img.draw_string(10, 10, f"Item {cls_count+1}/{REQUIRED}", image.COLOR_GRAY)
+        img.draw_string(10, 28, "Waiting for 's' from STM32...", image.COLOR_YELLOW)
+        
+        # 显示已有的分类结果
+        for idx, c in enumerate(cls_list):
+            name = IDX_TO_NAME.get(c - 1, "?")
+            img.draw_string(10, 50 + idx * 18, f"#{idx+1}: {name}", image.COLOR_GREEN)
+
+        # 检查UART
+        if uart_cmd and uart_cmd.strip().lower() == "s":
+            print(f"[UART] 收到 's', 开始分类第{cls_count+1}次")
+            step = STEP_CLASSIFY
+
+    # ============================================================
     #                  STEP_CLASSIFY  分类
     # ============================================================
     elif step == STEP_CLASSIFY:
-        img.draw_string(10, 10, f"Item {cls_count+1}/{REQUIRED}", image.COLOR_GRAY)
-
-        for idx, c in enumerate(cls_list):
-            name = IDX_TO_NAME.get(c - 1, "?")
-            img.draw_string(10, 30 + idx * 18, f"#{idx+1}: {name}", image.COLOR_GREEN)
-
-        if status_msg:
-            img.draw_string(10, 30 + cls_count * 18 + 5, status_msg, image.COLOR_YELLOW)
-
-        draw_btn(img, f"REC {cls_count+1}", image.COLOR_GRAY)
-
-        if pressed_edge and hit_btn(tx, ty):
-            try:
-                idx, score = clf.classify(img)
-                cls_num = idx + 1
-                cls_list.append(cls_num)
-                cls_count += 1
-                name = IDX_TO_NAME.get(idx, "?")
-                status_msg = f"{name} {score:.2f}"
-                print(f"[识别] #{cls_count}: {cls_num}({name}) conf={score:.3f}")
-                uart_write(f"CLASS:{cls_num}")
-
-                if cls_count >= REQUIRED:
-                    step = STEP_MATCHING
-                    print("[UI] 3次完成, 进入匹配")
-            except Exception as e:
-                status_msg = f"ERR:{e}"
-                print(f"[识别] 错误: {e}")
+        img.draw_string(10, 10, f"Classifying {cls_count+1}/{REQUIRED}...", image.COLOR_YELLOW)
+        img.draw_string(10, 28, "Please wait...", image.COLOR_GRAY)
+        disp.show(img)
+        
+        # 执行30帧投票分类
+        result, confidence = vote_classify(img, FRAMES_PER_CLASSIFY)
+        
+        if result is not None:
+            cls_list.append(result)
+            cls_count += 1
+            name = IDX_TO_NAME.get(result - 1, "?")
+            status_msg = f"#{cls_count}: {name} ({confidence:.1%})"
+            print(f"[分类] 第{cls_count}次: class{result}({name}) 置信度={confidence:.1%}")
+            
+            # 通知STM32分类完成
+            uart_write(f"CLASS:{result}")
+            
+            if cls_count >= REQUIRED:
+                # 3次分类完成，进入匹配
+                step = STEP_MATCHING
+                print("[分类] 3次完成, 进入匹配")
+            else:
+                # 继续等待下一个"s"
+                step = STEP_WAIT_S
+                print(f"[分类] 继续等待STM32发送下一个's'")
+        else:
+            status_msg = "Classify failed!"
+            print("[分类] 识别失败，重新等待's'")
+            step = STEP_WAIT_S
 
     # ============================================================
     #                  STEP_MATCHING  匹配
@@ -398,6 +457,8 @@ while st.running and not app.need_exit():
 
                 match_result = {"cls": cls_s, "ocr": ocr_s, "match": mat_s}
                 status_msg = f"MATCH:{mat_s}"
+                
+                # 发送结果给STM32
                 uart_write(f"MATCH:{mat_s}")
 
                 print(f"\n{'='*48}")
@@ -457,8 +518,7 @@ while st.running and not app.need_exit():
             uart_write(f"CLS={cls_count} SLAVE={ok} STEP={step}")
         elif cmd == "PING":
             uart_write("PONG")
-        else:
-            uart_write(f"UNKNOWN:{cmd}")
+        # 不处理"s"，因为上面已经处理了
 
     disp.show(img)
 
