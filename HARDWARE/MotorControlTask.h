@@ -96,6 +96,19 @@ extern moto_measure_t Motor[MOTOR_NUM];  /* CAN 回传的电机原始数据 */
 #define YAW_OPEN_ANGLE      0
 #define YAW_CLOSED_ANGLE    98000
 
+/* ---- 滑行电机(SLIDE_Y)八个固定位置 ----
+ * 货箱3个位置(取货区):① +Y, ③ 中线, ② -Y
+ * 空货箱5个位置(放置区):④ +Y, ⑤ +Y/2, ⑥ 中线, ⑦ -Y/2, ⑧ -Y
+ * Y 换算尚未标定,暂用 MAP_Y_TODO 占位;标定后改为 Y_MM_TO_COUNTS() 宏。 */
+#define SLIDE_Y_POS_1      500426   /* 货箱①(取货区 +Y) */
+#define SLIDE_Y_POS_3      0   /* 货箱③(取货区中线) */
+#define SLIDE_Y_POS_2      -499801   /* 货箱②(取货区 -Y) */
+#define SLIDE_Y_POS_4      MAP_Y_TODO   /* 空货箱④(放置区 +Y) */
+#define SLIDE_Y_POS_5      MAP_Y_TODO   /* 空货箱⑤(放置区 +Y/2) */
+#define SLIDE_Y_POS_6      MAP_Y_TODO   /* 空货箱⑥(放置区中线) */
+#define SLIDE_Y_POS_7      MAP_Y_TODO   /* 空货箱⑦(放置区 -Y/2) */
+#define SLIDE_Y_POS_8      MAP_Y_TODO   /* 空货箱⑧(放置区 -Y) */
+
 /* vofa 监视:选要画曲线的轴(实际速度/目标速度/实际位置/目标位置 4 通道) */
 #define VOFA_WATCH_AXIS    AXIS_LIFT_Z
 /* vofa 上报分频:控制循环 500Hz,每 2 周期发一帧 => 250Hz */
@@ -147,6 +160,21 @@ void    YawSetTarget(int32_t angle_counts);   /* 设旋转电机目标角度(cou
 void    YawOpen(void);                        /* 打开到 YAW_OPEN_ANGLE */
 void    YawClose(void);                       /* 关闭到 YAW_CLOSED_ANGLE */
 void    YawToggle(void);                      /* 在开/关两个位置之间切换 */
+
+/* ---- 滑行电机(SLIDE_Y)八位置控制 ----
+ * 货箱3个位置:SlideYGoTo1/2/3 (取货区①③②)
+ * 空货箱5个位置:SlideYGoTo4~8 (放置区④⑤⑥⑦⑧)
+ * SlideY_IsReached():非阻塞到位检测(容差5000 counts,待标定后调整)。 */
+void    SlideYGoTo(uint8_t pos);              /* 滑行到指定位置(1~8) */
+void    SlideYGoTo1(void);                    /* 到位置①(货箱取货区 +Y) */
+void    SlideYGoTo2(void);                    /* 到位置②(货箱取货区 -Y) */
+void    SlideYGoTo3(void);                    /* 到位置③(货箱取货区中线) */
+void    SlideYGoTo4(void);                    /* 到位置④(空货箱放置区 +Y) */
+void    SlideYGoTo5(void);                    /* 到位置⑤(空货箱放置区 +Y/2) */
+void    SlideYGoTo6(void);                    /* 到位置⑥(空货箱放置区中线) */
+void    SlideYGoTo7(void);                    /* 到位置⑦(空货箱放置区 -Y/2) */
+void    SlideYGoTo8(void);                    /* 到位置⑧(空货箱放置区 -Y) */
+uint8_t SlideY_IsReached(void);               /* 滑行是否到位(非阻塞) */
 
 /* ---- 自动取放货流程(非阻塞) ----
  * CraneFlow_Step():按键调用,推进到下一个大步骤(共6步,走完再按从头)。

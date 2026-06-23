@@ -278,6 +278,55 @@ void YawToggle(void)
     }
 }
 
+/* ============================================================================
+ * 滑行电机(SLIDE_Y)八位置控制
+ *   货箱3个位置:SLIDE_Y_POS_1 / _POS_3 / _POS_2 (取货区)
+ *   空货箱5个位置:SLIDE_Y_POS_4 ~ _POS_8 (放置区)
+ *   为避免在失能状态下设置目标被 MotorTargetSync 覆盖,
+ *   这里会先确保控制已使能。
+ * ============================================================================ */
+static void SlideYSetTarget(int32_t y_counts)
+{
+    if (!MotorControl_IsEnabled())
+    {
+        MotorControl_Enable();
+    }
+
+    Axis_SetTarget(AXIS_SLIDE_Y, y_counts);
+}
+
+void SlideYGoTo(uint8_t pos)
+{
+    int32_t target;
+    switch (pos)
+    {
+        case 1: target = SLIDE_Y_POS_1; break;
+        case 2: target = SLIDE_Y_POS_2; break;
+        case 3: target = SLIDE_Y_POS_3; break;
+        case 4: target = SLIDE_Y_POS_4; break;
+        case 5: target = SLIDE_Y_POS_5; break;
+        case 6: target = SLIDE_Y_POS_6; break;
+        case 7: target = SLIDE_Y_POS_7; break;
+        case 8: target = SLIDE_Y_POS_8; break;
+        default: return;                 /* 无效位置 */
+    }
+    SlideYSetTarget(target);
+}
+
+void SlideYGoTo1(void) { SlideYSetTarget(SLIDE_Y_POS_1); }
+void SlideYGoTo2(void) { SlideYSetTarget(SLIDE_Y_POS_2); }
+void SlideYGoTo3(void) { SlideYSetTarget(SLIDE_Y_POS_3); }
+void SlideYGoTo4(void) { SlideYSetTarget(SLIDE_Y_POS_4); }
+void SlideYGoTo5(void) { SlideYSetTarget(SLIDE_Y_POS_5); }
+void SlideYGoTo6(void) { SlideYSetTarget(SLIDE_Y_POS_6); }
+void SlideYGoTo7(void) { SlideYSetTarget(SLIDE_Y_POS_7); }
+void SlideYGoTo8(void) { SlideYSetTarget(SLIDE_Y_POS_8); }
+
+uint8_t SlideY_IsReached(void)
+{
+    return Axis_IsReached(AXIS_SLIDE_Y, 5000);   /* 容差 5000 counts,待标定后调整 */
+}
+
 int32_t Z_GetHeight(void)
 {
     return Axis_GetPos(AXIS_LIFT_Z);
