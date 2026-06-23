@@ -18,6 +18,7 @@
 |------|----------|------|
 | `main_maixcam.py` | 上位机 MaixCAM | 主程序。WiFi AP 热点、触摸屏 UI、自学习分类器（30帧投票）、TCP 服务端、UART 串口通信 |
 | `Ci_maixcam.py` | 下位机 MaixCAM | 副程序。WiFi 连接上位机、YOLO 数字检测（30帧投票 + 4位置矩形匹配 + 缺失数字推理）、TCP 客户端 |
+| `debug_stm32.py` | 上位机 MaixCAM | 调试工具。不需要下位机，使用虚拟OCR结果，单独与 STM32 联调上位机分类和匹配流程 |
 | `test_classify.py` | 上位机 MaixCAM | 调试工具。单独测试自学习分类器是否正常工作，显示识别结果和相似度 |
 
 ## 工作流程
