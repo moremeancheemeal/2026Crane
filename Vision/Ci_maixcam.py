@@ -1,86 +1,89 @@
 # ============================================================
-#  lower_main.py — 下位机 MaixCAM
-#  连接上位机WiFi AP → 舵机旋转5个位置 → 每位置30帧OCR → TCP通信
+#  Ci_maixcam.py — 下位机 MaixCAM (YOLO数字检测版)
+#  连接上位机WiFi AP → 摄像头30帧YOLO检测 → 按坐标矩形区域插入 → TCP通信
 #  只在收到上位机START时才扫描
+#
+#  识别逻辑：
+#    1. 摄像头拍30帧，每帧YOLO检测数字（预期检测到4个，范围1~5）
+#    2. 根据检测框中心点(X,Y)判断属于哪个位置（5个矩形区域）
+#    3. 30帧投票，每个位置取出现次数最多的数字
+#    4. 5个位置中没有检测到数字的那个，就是缺失的数字
+#    5. 缺失数字自动填入空位
+#    6. 最终结果如 [3,1,4,2,5]
 # ============================================================
 
 import socket
 import threading
-from maix import camera, display, image, nn, pwm, pinmap, sys, err, app
+from maix import camera, display, image, nn, sys, app
 from maix import network
 from maix import time as maix_time
 
 # ======================== 网络配置 ========================
-# 连接上位机的WiFi热点
 WIFI_SSID   = "maixcam"
 WIFI_PASSWD = "12345678"
+UPPER_IP    = "192.168.66.1"
+UPPER_PORT  = 9090
+RECON_SEC   = 1
 
-# TCP连接上位机（上位机AP的IP）
-UPPER_IP   = "192.168.66.1"
-UPPER_PORT = 9090
-RECON_SEC  = 1
+# ======================== YOLO模型配置 ========================
+YOLO_MODEL_PATH = "/root/models/yolov5s.mud"  # ← 改成你的模型路径
+YOLO_CONF_TH    = 0.5   # 置信度阈值
+YOLO_IOU_TH     = 0.45  # NMS IoU阈值
 
 # ======================== 扫描参数 ========================
-N_STEPS         = 5      # 一共扫描几个位置
-SETTLE_MS       = 500    # 舵机到位后等待时间(毫秒)，等画面稳定
-FRAMES_PER_POS  = 30     # 每个位置拍多少帧再OCR，越多越准但越慢
+FRAMES_PER_SCAN = 30    # 每次扫描拍多少帧
 
-# ======================== 舵机PWM参数 ========================
-# 大多数舵机: 50Hz, 0.5ms~2.5ms 对应 0°~180°
-# 占空比: 0.5/20=2.5%  2.5/20=12.5%
-DUTY_MIN   = 2.5
-DUTY_MAX   = 12.5
-SERVO_MIN_ANGLE = 0
-SERVO_MAX_ANGLE = 180
-
-# ======================== 5个位置的舵机角度(度) ========================
-# 直接填角度值(度)，程序会自动转换成PWM占空比
-SERVO_DEG = [
-    0,    # 位置1 舵机角度(度) ← 根据实际调试修改
-    45,   # 位置2 舵机角度(度) ← 根据实际调试修改
-    90,   # 位置3 舵机角度(度) ← 根据实际调试修改
-    135,  # 位置4 舵机角度(度) ← 根据实际调试修改
-    180,  # 位置5 舵机角度(度) ← 根据实际调试修改
+# ======================== 4个位置的坐标矩形范围 ========================
+# 实际画面中只有4个数字，每个数字由一个矩形区域定位
+# 格式：(x_min, x_max, y_min, y_max)
+# 检测框中心点落在哪个矩形内，就属于哪个位置
+# 第5个数字是推理出来的（1~5中没出现的那个），自动放到结果最后一位
+# 单位是像素，请根据实际画面调试后填入
+POS_RECTS = [
+    # (x_min, x_max, y_min, y_max)
+    (20, 80, 190, 220),     # 位置1  ← 调试后修改
+    (100, 160, 190, 220),   # 位置2  ← 调试后修改
+    (180, 240, 190, 220),   # 位置3  ← 调试后修改
+    (260, 320, 190, 220),   # 位置4  ← 调试后修改
 ]
 
-# ======================== 调试模式开关 ========================
-# -1  = 正常模式，5个位置全部扫描
-# 0~4 = 只停在指定位置（方便单独调试该位置的舵机角度）
-DEBUG_STEP = -1
 
 # ======================== 连接WiFi ========================
 print("[WIFI] 连接上位机热点...")
 wifi = network.wifi.Wifi()
-
 wifi.disconnect()
-maix_time.sleep_ms(11)
-print("断开一下\n")
-wifi.connect(WIFI_SSID, WIFI_PASSWD, timeout=2)
-print(f"[WIFI] 已连接")
+maix_time.sleep_ms(500)
+print("[WIFI] 已断开旧连接")
+wifi.connect(WIFI_SSID, WIFI_PASSWD, timeout=10)
+print("[WIFI] 已连接")
 
 
-# ======================== 舵机初始化 ========================
+# ======================== YOLO模型初始化 ========================
+print("[INIT] 加载YOLO模型...")
+detector = nn.YOLOv5(model=YOLO_MODEL_PATH, dual_buff=True)
+print(f"[INIT] YOLO模型已加载")
+print(f"[INIT] 类别: {detector.labels}")
 
-def deg_to_duty(deg):
-    """角度(度) → PWM占空比(%)"""
-    deg = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, deg))
-    pct = (deg - SERVO_MIN_ANGLE) / (SERVO_MAX_ANGLE - SERVO_MIN_ANGLE) * 100
-    return (DUTY_MAX - DUTY_MIN) * pct / 100.0 + DUTY_MIN
-
-
-dev = sys.device_id()
-pn  = "A31" if dev == "maixcam2" else "A19"
-pid = 7
-err.check_raise(pinmap.set_pin_function(pn, f"PWM{pid}"), "pinmap failed")
-servo = pwm.PWM(pid, freq=50, duty=deg_to_duty(0), enable=True)
-
-
-# ======================== OCR模型 & 摄像头初始化 ========================
-ocr  = nn.PP_OCR("/root/models/pp_ocr.mud")
-cam  = camera.Camera(ocr.input_width(), ocr.input_height(), ocr.input_format())
+# ======================== 摄像头 & 显示初始化 ========================
+cam  = camera.Camera(detector.input_width(), detector.input_height(), detector.input_format())
 disp = display.Display()
-image.load_font("ppocr", "/maixapp/share/font/ppocr_keys_v1.ttf", size=20)
-image.set_default_font("ppocr")
+
+IW = cam.width()
+IH = cam.height()
+
+# 打印坐标范围
+print(f"[INIT] 图像: {IW}x{IH}")
+print(f"[INIT] 4个位置坐标矩形范围:")
+for i, (x1, x2, y1, y2) in enumerate(POS_RECTS):
+    print(f"  位置{i+1}: X=[{x1},{x2}) Y=[{y1},{y2})")
+print(f"[INIT] 位置5: 自动推理（1~5中缺失的数字）")
+
+# 加载字体
+try:
+    image.load_font("ppocr", "/maixapp/share/font/ppocr_keys_v1.ttf", size=20)
+    image.set_default_font("ppocr")
+except:
+    pass
 
 
 # ======================== 全局状态管理 ========================
@@ -91,11 +94,11 @@ class S:
         self.trigger   = False
         self.busy      = False
         self.connected = False
-        self.res       = [None] * N_STEPS
+        self.res       = [None] * 5  # 最终5个数字结果
 
     def begin(self):
         with self._l:
-            self.res  = [None] * N_STEPS
+            self.res  = [None] * 5
             self.busy = True
 
     def end(self):
@@ -201,105 +204,159 @@ class Cli:
 cli = Cli(UPPER_IP, UPPER_PORT)
 
 
-# ======================== OCR识别 ========================
-def read_num(img):
-    """从图像中OCR识别数字1~5"""
-    try:
-        for obj in ocr.detect(img):
-            for ch in obj.char_str().strip():
-                if ch in "12345":
-                    return int(ch)
-    except:
-        pass
-    return None
-
-
-# ======================== 多帧投票取最终结果 ========================
-def vote_result(results):
+# ======================== YOLO数字检测 ========================
+def detect_digits(img):
     """
-    从多帧识别结果中投票选出最可靠的那个数字
+    对一帧图像进行YOLO检测，返回检测到的数字列表和原始obj列表
+
+    返回：(digits, objs)
+        digits: list of (digit, x_center, y_center)  用于投票
+        objs: 原始检测结果列表，用于绘制显示
+    """
+    digits = []
+    objs = detector.detect(img, conf_th=YOLO_CONF_TH, iou_th=YOLO_IOU_TH)
+    for obj in objs:
+        digit = obj.class_id + 1  # class_id是0-based，转为1-based (1~5)
+        x_center = obj.x + obj.w // 2  # 检测框中心X坐标
+        y_center = obj.y + obj.h // 2  # 检测框中心Y坐标
+        digits.append((digit, x_center, y_center))
+    return digits, objs
+
+
+def xy_to_position(x_center, y_center):
+    """
+    根据检测框中心点(X,Y)判断属于哪个位置（0~4）
+    遍历5个矩形区域，找到包含该点的区域
+    如果不在任何范围内，返回None（该检测结果被忽略）
+    """
+    for i, (x_min, x_max, y_min, y_max) in enumerate(POS_RECTS):
+        if x_min <= x_center < x_max and y_min <= y_center < y_max:
+            return i
+    return None  # 不在任何位置范围内，忽略
+
+
+def vote_and_infer(all_frames_results):
+    """
+    对30帧的检测结果进行投票，推理出最终5个数字
+
+    逻辑：4个位置各检测1个数字，第5个数字是1~5中缺失的那个
 
     参数：
-        results : list — 每帧的识别结果，如 [1, 1, None, 1, 3, 1, None, ...]
+        all_frames_results: list of list，每帧的检测结果 [(digit, x, y), ...]
+
     返回：
-        int  — 投票选出的最终数字
-        None — 全部帧都没识别到
+        list: 5个数字的最终结果，如 [3, 1, 4, 2, 5]
+               前4个是实际检测的，第5个是推理出来的
     """
-    valid = [v for v in results if v is not None]
-    if not valid:
-        return None
-    count = {}
-    for v in valid:
-        count[v] = count.get(v, 0) + 1
-    return max(count, key=count.get)
+    num_positions = len(POS_RECTS)  # 4个位置
+    pos_votes = [{} for _ in range(num_positions)]
+
+    for frame_results in all_frames_results:
+        for digit, x_center, y_center in frame_results:
+            pos = xy_to_position(x_center, y_center)
+            if pos is not None and 1 <= digit <= 5:
+                pos_votes[pos][digit] = pos_votes[pos].get(digit, 0) + 1
+
+    # 每个位置取票数最高的数字
+    pos_result = []
+    for i in range(num_positions):
+        if pos_votes[i]:
+            pos_result.append(max(pos_votes[i], key=pos_votes[i].get))
+        else:
+            pos_result.append(None)
+
+    # 找出缺失的数字（1~5中哪个没有出现在4个检测结果中）
+    detected_digits = set(v for v in pos_result if v is not None)
+    missing_digits = set(range(1, 6)) - detected_digits
+
+    # 把缺失数字填入检测为空的位置
+    if missing_digits:
+        for i in range(num_positions):
+            if pos_result[i] is None:
+                pos_result[i] = missing_digits.pop()
+                if not missing_digits:
+                    break
+
+    # 还有空位？填0标记异常
+    for i in range(num_positions):
+        if pos_result[i] is None:
+            pos_result[i] = 0
+
+    # ★ 第5个数字：推理出来的缺失数字（放到最后一位）
+    # 再算一次，因为前面可能已经用掉了
+    detected_now = set(pos_result)
+    missing_now = set(range(1, 6)) - detected_now
+    if missing_now:
+        pos_result.append(missing_now.pop())
+    else:
+        # 极端情况：4个位置已经覆盖了1~5（不应该发生）
+        pos_result.append(0)
+
+    return pos_result  # 长度为5
 
 
 # ======================== 扫描 ========================
 def scan():
     """
-    执行一轮完整扫描：舵机依次转到5个位置，每个位置拍FRAMES_PER_POS帧并OCR
+    执行一轮扫描：拍30帧YOLO检测 → 投票 → 推理缺失数字
 
-    时间估算（默认参数）：
-        每个位置 = 500ms稳定 + 30帧 × 每帧约33ms ≈ 1.5秒
-        5个位置 ≈ 7~8秒
+    时间估算：
+        30帧 × 每帧约50ms ≈ 1.5秒
     """
     st.begin()
-    print("\n  === 扫描 ===")
+    print("\n  === YOLO扫描 ===")
 
-    # ---- 调试模式：只停在某一个位置 ----
-    if 0 <= DEBUG_STEP < N_STEPS:
-        i = DEBUG_STEP
-        deg = SERVO_DEG[i]
-        servo.duty(deg_to_duty(deg))
-        maix_time.sleep_ms(SETTLE_MS)
+    all_frames = []  # 存储每帧的检测结果
 
-        frames_result = []
-        for f in range(FRAMES_PER_POS):
-            img = cam.read()
-            v = read_num(img)
-            frames_result.append(v)
-            if (f + 1) % 10 == 0:
-                print(f"  [DEBUG] pos{i+1} 第{f+1}/{FRAMES_PER_POS}帧")
+    for f in range(FRAMES_PER_SCAN):
+        img = cam.read()
+        digits, objs = detect_digits(img)
+        all_frames.append(digits)
 
-        final = vote_result(frames_result)
-        valid_count = sum(1 for v in frames_result if v is not None)
-        st.put(i, final)
+        # 在屏幕上显示检测结果（复用已有的objs，不重复detect）
+        for obj in objs:
+            img.draw_rect(obj.x, obj.y, obj.w, obj.h, image.COLOR_RED, 2)
+            label = f"{detector.labels[obj.class_id]}:{obj.score:.2f}"
+            img.draw_string(obj.x, obj.y, label, image.COLOR_RED)
 
-        t = str(final) if final else "X"
-        c = image.COLOR_GREEN if final else image.COLOR_RED
-        img.draw_string(10, 10, f"[DEBUG] pos{i+1} {deg}deg {valid_count}/{FRAMES_PER_POS} val={t}", c)
+        # 绘制5个位置的矩形框
+        for i, (x1, x2, y1, y2) in enumerate(POS_RECTS):
+            img.draw_rect(x1, y1, x2 - x1, y2 - y1, image.COLOR_YELLOW, 1)
+            img.draw_string(x1, y1 - 12, f"P{i+1}", image.COLOR_YELLOW)
+
+        # 显示进度
+        img.draw_string(10, 10, f"Scanning {f+1}/{FRAMES_PER_SCAN}...", image.COLOR_YELLOW)
         disp.show(img)
-        print(f"  [DEBUG] 位置{i+1} 角度={deg}  有效帧={valid_count}/{FRAMES_PER_POS} 结果={t}")
-        st.end()
-        return
 
-    # ---- 正常模式：5个位置依次扫描 ----
-    for i in range(N_STEPS):
-        if not st.running:
-            break
+        if (f + 1) % 10 == 0:
+            print(f"  [扫描] 第{f+1}/{FRAMES_PER_SCAN}帧")
 
-        deg = SERVO_DEG[i]
-        servo.duty(deg_to_duty(deg))
-        maix_time.sleep_ms(SETTLE_MS)
+    # 投票推理
+    result = vote_and_infer(all_frames)
 
-        frames_result = []
-        for f in range(FRAMES_PER_POS):
-            img = cam.read()
-            v = read_num(img)
-            frames_result.append(v)
+    # 存入全局状态
+    for i, v in enumerate(result):
+        st.put(i, v)
 
-        final = vote_result(frames_result)
-        valid_count = sum(1 for v in frames_result if v is not None)
-        st.put(i, final)
+    # 最终结果显示
+    final_img = cam.read()
+    result_str = ",".join(str(v) for v in result)
+    final_img.draw_string(10, 10, f"Result: [{result_str}]", image.COLOR_GREEN)
 
-        t = str(final) if final else "X"
-        c = image.COLOR_GREEN if final else image.COLOR_RED
-        img.draw_string(10, 10, f"{i+1}/5 {deg}deg {valid_count}/{FRAMES_PER_POS} val={t}", c)
-        disp.show(img)
-        print(f"  [{i+1}/5] 角度={deg}  有效帧={valid_count}/{FRAMES_PER_POS} 结果={t}")
+    # 显示每个位置的详细信息
+    for i in range(len(POS_RECTS)):
+        x1, x2, y1, y2 = POS_RECTS[i]
+        final_img.draw_string(10, 40 + i * 20,
+            f"Pos{i+1}: X[{x1},{x2}] Y[{y1},{y2}] = {result[i]}", image.COLOR_GRAY)
+        final_img.draw_rect(x1, y1, x2 - x1, y2 - y1, image.COLOR_YELLOW, 1)
+    # 第5个位置：推理出来的
+    final_img.draw_string(10, 40 + len(POS_RECTS) * 20,
+        f"Pos5: inferred = {result[4]}", image.COLOR_CYAN)
+
+    disp.show(final_img)
 
     st.end()
-    print(f"  完成: [{st.to_str()}]\n")
+    print(f"  完成: [{result_str}]\n")
 
 
 # ======================== 主循环 ========================
@@ -322,13 +379,11 @@ while st.running and not app.need_exit():
         maix_time.sleep_ms(100)
 
     if st.running and not app.need_exit():
-        print("[SYS] 收到START，开始扫描...")
+        print("[SYS] 收到START，开始YOLO扫描...")
         scan()
         print("[SYS] 扫描完成，继续等待指令...")
 
 
 # ======================== 程序退出清理 ========================
-servo.duty(deg_to_duty(0))
-servo.enable(False)
 cli.close()
 print("[SYS] 已退出")
