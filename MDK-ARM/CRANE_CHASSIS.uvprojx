@@ -692,6 +692,26 @@
               <FilePath>..\HARDWARE\XYPath.h</FilePath>
             </File>
             <File>
+              <FileName>VisionComm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\HARDWARE\VisionComm.c</FilePath>
+            </File>
+            <File>
+              <FileName>VisionComm.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\HARDWARE\VisionComm.h</FilePath>
+            </File>
+            <File>
+              <FileName>VisionPositionMap.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\HARDWARE\VisionPositionMap.c</FilePath>
+            </File>
+            <File>
+              <FileName>VisionPositionMap.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\HARDWARE\VisionPositionMap.h</FilePath>
+            </File>
+            <File>
               <FileName>MapCoords.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\HARDWARE\MapCoords.h</FilePath>

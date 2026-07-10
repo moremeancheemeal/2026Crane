@@ -42,6 +42,7 @@
 #include "string.h"
 #include "math.h"
 #include "uart_comm.h"
+#include "VisionComm.h"
 //#include "kalman.h"
 /* USER CODE END Includes */
 
@@ -219,9 +220,10 @@ int main(void)
 	HAL_UART_Receive_IT_IDLE(&huart1,UART_Buffer,100); //閬ユ帶鍣ㄤ覆鍙ｅ垵濮嬪寲
 	HAL_UART_Receive_IT(&huart6, &Flow_Rx_Buffer ,1);//鍏夋祦璁℃帴鏀朵腑鏂?
 	HAL_UART_Receive_IT(&huart7, &IMU_Rx_Buffer, 1);//IMU鎺ユ敹涓柇
+	VisionComm_Init(&huart8);
 //	HAL_UART_Receive_IT(&huart8, &uart_rx_buffer[buffer_index], 1);//涓婁綅鏈烘帴鏀朵腑鏂?
 //	HAL_UART_Receive_IT(&huart8, &uart_rx_buffer[buffer_index], 1);//涓婁綅鏈烘帴鏀朵腑鏂?
-	/* 原 UART8 上位机发送中断(stopflag 自循环)已移除,改作 vofa/日志专用口 */
+	/* UART8 reserved for MaixCAM vision text protocol. */
 
 //	kalman_Init();
 //	while (!(s_cDataUpdate & ANGLE_UPDATE))
@@ -381,22 +383,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	} 
 	if (huart->Instance == UART8)
 	{
-		if (uart_rx_buffer[buffer_index] == '!')  // 妫€娴嬪埌甯х粨鏉熺
-		{
-			uart_rx_buffer[buffer_index] = '\0'; 
-			buffer_index = 0;// 閲嶇疆缂撳啿鍖虹储寮?
-			UART_ParseCommand(uart_rx_buffer);
-		}
-		else
-		{
-			buffer_index++;
-			if (buffer_index >= UART_BUFFER_SIZE)
-			{
-				buffer_index = 0;
-			}
-		}
-		//	HAL_UART_Receive_IT(&huart8, &uart_rx_buffer[buffer_index], 1);
-
+		VisionComm_RxCpltCallback(huart);
 	}
 	
 }

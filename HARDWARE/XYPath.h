@@ -26,7 +26,7 @@
  *        x_ff  = (dx/ds)*sdot, y_ff = (dy/ds)*sdot    -> 喂 X/Y 速度前馈
  *
  * 单位:全部用 counts 域(与 TrajTrack / 轴目标一致)。航点由 MapCoords.h
- *       的 map_pt_t 给出。Y 未标定前航点 y 为占位值,联调时回填即可。
+ *       的 map_pt_t 给出,取放与绕障点均使用实测目标值。
  *
  * ⚠ 集成约束:进入路径模式时,X(GANTRY_L/R)与 Y(SLIDE_Y)的位置环 ref
  *   必须来自本模块,绕过各自的 axis[i].traj(否则双重滤波破坏联动)。
@@ -91,7 +91,7 @@ void XYPath_Init(xy_path_t *p, float v_max, float a_max, float j_max, float peri
 
 /* 用一组航点构建路径:折线连接,拐角按 blend_radius 做圆弧混合。
  *   pts/num:航点数组(counts 域,map_pt_t)。
- *   blend_radius:拐角圆弧半径(counts);0 = 纯折线(拐角速度归零,会停顿)。
+ *   blend_radius:拐角圆弧半径(counts);0 = 纯折线(拐角处速度方向不连续)。
  *   构建后路径就绪但未启动,需再调 XYPath_Start。 */
 void XYPath_Build(xy_path_t *p, const map_pt_t *pts, uint8_t num, float blend_radius);
 

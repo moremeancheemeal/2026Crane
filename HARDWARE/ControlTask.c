@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "MotorControlTask.h"
+#include "VisionComm.h"
 
 #define ABOARD_POS_KEY_PORT     GPIOB
 #define ABOARD_POS_KEY_PIN      GPIO_PIN_2
@@ -38,8 +39,9 @@ void AllTask(void)
 {
     static uint8_t key_scan_cnt = 0;
 
-//    MotorSysTask();
-//    CraneFlow_Tick();           /* 每周期推进自动取放流程的"到位后接续" */
+    MotorSysTask();
+    VisionComm_Poll();
+    CraneFlow_Tick();           /* 每周期推进自动取放流程的"到位后接续" */
 
     key_scan_cnt++;
     if (key_scan_cnt < 10)

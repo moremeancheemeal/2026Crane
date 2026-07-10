@@ -86,11 +86,9 @@ extern moto_measure_t Motor[MOTOR_NUM];  /* CAN 回传的电机原始数据 */
 #define X_CAL_POINT2   (1652387)
 #define X_CAL_POINT3   (1860000)
 
-/* ---- 夹爪旋转电机两个固定位置 ----
- * 正常约定:上电在"松开"位置归零,故开=0;"+方向=闭合",闭=+9003204。
- * (此前为救闭合断电卡死的爪子曾临时反转,松开后已恢复正常约定。) */
-#define CLAW_OPEN_ANGLE     0
-#define CLAW_CLOSED_ANGLE   9003204
+/* ---- 夹爪旋转电机两个固定位置(实测标定 counts) ---- */
+#define CLAW_OPEN_ANGLE     100000
+#define CLAW_CLOSED_ANGLE   0
 
 /* ---- 旋转电机(YAW)两个固定位置 ---- */
 #define YAW_OPEN_ANGLE      0
@@ -181,6 +179,12 @@ uint8_t SlideY_IsReached(void);               /* 滑行是否到位(非阻塞) *
  * CraneFlow_Tick():每控制周期调用,处理步骤内"到位后自动接续"。 */
 void    CraneFlow_Step(void);
 void    CraneFlow_Tick(void);
+void    CraneFlow_OnVisionReady(void);
+void    CraneFlow_OnVisionStart(void);
+void    CraneFlow_OnVisionClassifyDone(void);
+void    CraneFlow_OnVisionMatch(uint8_t pos1, uint8_t pos2, uint8_t pos3);
+void    CraneFlow_OnVisionError(void);
+uint8_t CraneFlow_IsVisionActive(void);
 
 /* ---- XY 联动路径上层封装(折线 + 拐角圆弧绕障,非阻塞) ----
  * CranePath_Run():构建并启动一条 counts 域航点路径(blend_radius=拐角圆弧半径)。

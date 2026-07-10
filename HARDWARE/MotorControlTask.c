@@ -4,6 +4,8 @@
 #include "usart.h"
 #include "vofaPlus.h"
 #include "XYPath.h"
+#include "VisionComm.h"
+#include "VisionPositionMap.h"
 
 /* ============================================================================
  * 编译期配置表 —— 每个轴一行,改参数只改这里
@@ -243,11 +245,11 @@ void ClawToggle(void)
 {
     if (Axis_GetPos(AXIS_CLAW) < ((CLAW_OPEN_ANGLE + CLAW_CLOSED_ANGLE) / 2))
     {
-        ClawClose();
+        ClawOpen();
     }
     else
     {
-        ClawOpen();
+        ClawClose();
     }
 }
 
@@ -345,7 +347,7 @@ uint8_t Z_IsReached(int32_t tol_counts)
  * ⚠ 注意:Z 为升降轴,在"顶"高度失能会被重力拉下;分步式按你要求保留,
  *   若掉落不可接受,改连贯式(一按完成抬顶+受控下降,全程不失能)。
  * ============================================================================ */
-#define Z_TOP          (-230000)   /* 升降最高(留余量,避免顶死硬限位) */
+#define Z_TOP          Z_TOP_TRAVEL   /* 最高运输位使用本次实测标定 */
 #define Z_HEIGHT_NUM   9
 static const int32_t z_height_points[Z_HEIGHT_NUM] =
 {
@@ -439,10 +441,492 @@ static uint8_t GantryReached(int32_t tol)
     return (Axis_IsReached(AXIS_GANTRY_L, tol) && Axis_IsReached(AXIS_GANTRY_R, tol));
 }
 
+/* ============================================================================
+ * Vision coordinated flow
+ * ----------------------------------------------------------------------------
+ * Classification order is owned by STM32 motion: visit fixed pick positions
+ * 1 -> 2 -> 3 and send "s" after each item is in the classification pose.
+ * MATCH only fills the destination places for those already-classified items.
+ * ============================================================================ */
+#define VISION_ITEM_NUM     3U
+#define FLOW_TOL_Y          15000
+#define FLOW_TOL_YAW        10000
+
+typedef enum
+{
+    VISION_SUB_IDLE = 0,
+
+    VISION_SUB_SAMPLE_LIFT_TOP,
+    VISION_SUB_SAMPLE_MOVE_XY,
+    VISION_SUB_SAMPLE_SEND_S,
+    VISION_SUB_SAMPLE_WAIT_SDONE,
+    VISION_SUB_WAIT_MATCH,
+
+    VISION_SUB_PICK_LIFT_TOP,
+    VISION_SUB_PICK_MOVE_XY,
+    VISION_SUB_PICK_DOWN,
+    VISION_SUB_PICK_CLAW_CLOSE,
+    VISION_SUB_PICK_LIFT_AFTER,
+
+    VISION_SUB_PLACE_MOVE_XY,
+    VISION_SUB_PLACE_YAW,
+    VISION_SUB_PLACE_DOWN,
+    VISION_SUB_PLACE_CLAW_OPEN,
+    VISION_SUB_PLACE_LIFT_AFTER,
+    VISION_SUB_PLACE_YAW_RESET,
+
+    VISION_SUB_RETURN_MOVE_HOME,
+    VISION_SUB_RETURN_DOWN_BOTTOM,
+    VISION_SUB_DONE,
+    VISION_SUB_ERROR,
+} vision_sub_t;
+
+static const mission_t vision_pick_table[VISION_ITEM_NUM] =
+{
+    { BOX_PICK_1, BOX_PLACE_4 },
+    { BOX_PICK_2, BOX_PLACE_4 },
+    { BOX_PICK_3, BOX_PLACE_4 },
+};
+static box_t vision_place_table[VISION_ITEM_NUM];
+
+typedef enum
+{
+    VISION_ZONE_LEFT = 0,
+    VISION_ZONE_MIDDLE,
+    VISION_ZONE_RIGHT,
+} vision_zone_t;
+
+#define VISION_PATH_MAX_POINTS  4U
+
+typedef enum
+{
+    VISION_PATH_IDLE = 0,
+    VISION_PATH_ACTIVE,
+    VISION_PATH_DIRECT,
+} vision_path_state_t;
+
+static map_pt_t vision_path_points[VISION_PATH_MAX_POINTS];
+static map_pt_t vision_path_target;
+static vision_path_state_t vision_path_state = VISION_PATH_IDLE;
+
+static uint8_t vision_active = 0U;
+static uint8_t vision_host_ready = 0U;
+static uint8_t vision_classify_done = 0U;
+static uint8_t vision_match_ready = 0U;
+static uint8_t vision_sample_index = 0U;
+static uint8_t vision_item_index = 0U;
+static vision_sub_t vision_sub = VISION_SUB_IDLE;
+
+static uint8_t VisionFlow_ValueReached(int32_t value, int32_t target, int32_t tol)
+{
+    int64_t diff = (int64_t)value - (int64_t)target;
+
+    if (diff < 0)
+    {
+        diff = -diff;
+    }
+    return (diff <= (int64_t)tol) ? 1U : 0U;
+}
+
+static uint8_t VisionFlow_XYAtTarget(int32_t x_counts, int32_t y_counts)
+{
+    return (VisionFlow_ValueReached(Axis_GetPos(AXIS_GANTRY_L), x_counts, FLOW_TOL_X) &&
+            VisionFlow_ValueReached(Axis_GetPos(AXIS_GANTRY_R), x_counts, FLOW_TOL_X) &&
+            VisionFlow_ValueReached(Axis_GetPos(AXIS_SLIDE_Y), y_counts, FLOW_TOL_Y));
+}
+
+static vision_zone_t VisionFlow_GetZone(int32_t x_counts)
+{
+    if (x_counts < DETOUR_BEAN_X_COUNTS)
+    {
+        return VISION_ZONE_LEFT;
+    }
+    if (x_counts > DETOUR_BOX_X_COUNTS)
+    {
+        return VISION_ZONE_RIGHT;
+    }
+    return VISION_ZONE_MIDDLE;
+}
+
+static void VisionFlow_StartXYPath(int32_t x_counts, int32_t y_counts)
+{
+    int32_t pos_l = Axis_GetPos(AXIS_GANTRY_L);
+    int32_t pos_r = Axis_GetPos(AXIS_GANTRY_R);
+    int32_t start_x = (int32_t)(((int64_t)pos_l + (int64_t)pos_r) / 2);
+    int32_t start_y = Axis_GetPos(AXIS_SLIDE_Y);
+    vision_zone_t start_zone = VisionFlow_GetZone(start_x);
+    vision_zone_t target_zone = VisionFlow_GetZone(x_counts);
+    uint8_t point_num = 0U;
+
+    if (CranePath_IsActive() || vision_path_state != VISION_PATH_IDLE)
+    {
+        CranePath_Finish();
+    }
+
+    vision_path_target.x = x_counts;
+    vision_path_target.y = y_counts;
+
+    if (VisionFlow_XYAtTarget(x_counts, y_counts))
+    {
+        vision_path_state = VISION_PATH_IDLE;
+        return;
+    }
+
+    if (start_x == x_counts && start_y == y_counts)
+    {
+        Axis_SetTargetXGantry(x_counts);
+        Axis_SetTarget(AXIS_SLIDE_Y, y_counts);
+        vision_path_state = VISION_PATH_DIRECT;
+        return;
+    }
+
+    vision_path_points[point_num].x = start_x;
+    vision_path_points[point_num].y = start_y;
+    point_num++;
+
+    if (start_zone < target_zone)
+    {
+        if (start_zone == VISION_ZONE_LEFT)
+        {
+            vision_path_points[point_num].x = DETOUR_BEAN_X_COUNTS;
+            vision_path_points[point_num].y = DETOUR_BEAN_Y_COUNTS;
+            point_num++;
+        }
+        if (target_zone == VISION_ZONE_RIGHT)
+        {
+            vision_path_points[point_num].x = DETOUR_BOX_X_COUNTS;
+            vision_path_points[point_num].y = DETOUR_BOX_Y_COUNTS;
+            point_num++;
+        }
+    }
+    else if (start_zone > target_zone)
+    {
+        if (start_zone == VISION_ZONE_RIGHT)
+        {
+            vision_path_points[point_num].x = DETOUR_BOX_X_COUNTS;
+            vision_path_points[point_num].y = DETOUR_BOX_Y_COUNTS;
+            point_num++;
+        }
+        if (target_zone == VISION_ZONE_LEFT)
+        {
+            vision_path_points[point_num].x = DETOUR_BEAN_X_COUNTS;
+            vision_path_points[point_num].y = DETOUR_BEAN_Y_COUNTS;
+            point_num++;
+        }
+    }
+
+    vision_path_points[point_num] = vision_path_target;
+    point_num++;
+    vision_path_state = VISION_PATH_ACTIVE;
+    CranePath_Run(vision_path_points, point_num, PATH_CORNER_BLEND_COUNTS);
+}
+
+static uint8_t VisionFlow_XYPathReached(void)
+{
+    if (vision_path_state == VISION_PATH_IDLE)
+    {
+        return VisionFlow_XYAtTarget(vision_path_target.x, vision_path_target.y);
+    }
+
+    if (vision_path_state == VISION_PATH_DIRECT)
+    {
+        if (GantryReached(FLOW_TOL_X) && Axis_IsReached(AXIS_SLIDE_Y, FLOW_TOL_Y))
+        {
+            vision_path_state = VISION_PATH_IDLE;
+            return 1U;
+        }
+        return 0U;
+    }
+
+    if (!CranePath_IsDone() ||
+        !VisionFlow_XYAtTarget(vision_path_target.x, vision_path_target.y))
+    {
+        return 0U;
+    }
+
+    CranePath_Finish();
+    vision_path_state = VISION_PATH_IDLE;
+    return 1U;
+}
+
+static void VisionFlow_StartSampleMove(void)
+{
+    set_z(Z_TOP);
+    YawOpen();
+    vision_sub = VISION_SUB_SAMPLE_LIFT_TOP;
+}
+
+static void VisionFlow_StartPickPlace(void)
+{
+    set_z(Z_TOP);
+    YawOpen();
+    vision_sub = VISION_SUB_PICK_LIFT_TOP;
+}
+
+static void VisionFlow_Reset(void)
+{
+    if (CranePath_IsActive() || vision_path_state != VISION_PATH_IDLE)
+    {
+        CranePath_Finish();
+    }
+
+    vision_active = 0U;
+    vision_classify_done = 0U;
+    vision_match_ready = 0U;
+    vision_sample_index = 0U;
+    vision_item_index = 0U;
+    vision_path_state = VISION_PATH_IDLE;
+    vision_sub = VISION_SUB_IDLE;
+}
+
+uint8_t CraneFlow_IsVisionActive(void)
+{
+    return vision_active;
+}
+
+void CraneFlow_OnVisionReady(void)
+{
+    vision_host_ready = 1U;
+}
+
+void CraneFlow_OnVisionStart(void)
+{
+    (void)vision_host_ready;
+
+    MotorControl_Enable();
+    flow_step = 0U;
+    flow_sub = SUB_DONE;
+
+    VisionFlow_Reset();
+    vision_active = 1U;
+    ClawOpen();
+    VisionFlow_StartSampleMove();
+}
+
+void CraneFlow_OnVisionClassifyDone(void)
+{
+    if (vision_active)
+    {
+        vision_classify_done = 1U;
+    }
+}
+
+void CraneFlow_OnVisionMatch(uint8_t pos1, uint8_t pos2, uint8_t pos3)
+{
+    if (!VisionPosition_GetPlace(pos1, &vision_place_table[0]) ||
+        !VisionPosition_GetPlace(pos2, &vision_place_table[1]) ||
+        !VisionPosition_GetPlace(pos3, &vision_place_table[2]))
+    {
+        vision_sub = VISION_SUB_ERROR;
+        return;
+    }
+
+    vision_match_ready = 1U;
+}
+
+void CraneFlow_OnVisionError(void)
+{
+    if (vision_active)
+    {
+        vision_sub = VISION_SUB_ERROR;
+    }
+}
+
+static void CraneFlow_VisionTick(void)
+{
+    switch (vision_sub)
+    {
+        case VISION_SUB_SAMPLE_LIFT_TOP:
+            if (Z_IsReached(FLOW_TOL_Z) && Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
+            {
+                const box_t *pick = &vision_pick_table[vision_sample_index].pick;
+                VisionFlow_StartXYPath(pick->x_counts, pick->y_counts);
+                vision_sub = VISION_SUB_SAMPLE_MOVE_XY;
+            }
+            break;
+
+        case VISION_SUB_SAMPLE_MOVE_XY:
+            if (VisionFlow_XYPathReached())
+            {
+                vision_sub = VISION_SUB_SAMPLE_SEND_S;
+            }
+            break;
+
+        case VISION_SUB_SAMPLE_SEND_S:
+            if (VisionComm_SendClassifyTrigger() == HAL_OK)
+            {
+                vision_classify_done = 0U;
+                vision_sub = VISION_SUB_SAMPLE_WAIT_SDONE;
+            }
+            else
+            {
+                vision_sub = VISION_SUB_ERROR;
+            }
+            break;
+
+        case VISION_SUB_SAMPLE_WAIT_SDONE:
+            if (vision_classify_done)
+            {
+                vision_classify_done = 0U;
+                vision_sample_index++;
+                if (vision_sample_index < VISION_ITEM_NUM)
+                {
+                    VisionFlow_StartSampleMove();
+                }
+                else
+                {
+                    vision_sub = VISION_SUB_WAIT_MATCH;
+                }
+            }
+            break;
+
+        case VISION_SUB_WAIT_MATCH:
+            if (vision_match_ready)
+            {
+                vision_item_index = 0U;
+                VisionFlow_StartPickPlace();
+            }
+            break;
+
+        case VISION_SUB_PICK_LIFT_TOP:
+            if (Z_IsReached(FLOW_TOL_Z) && Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
+            {
+                const box_t *pick = &vision_pick_table[vision_item_index].pick;
+                VisionFlow_StartXYPath(pick->x_counts, pick->y_counts);
+                vision_sub = VISION_SUB_PICK_MOVE_XY;
+            }
+            break;
+
+        case VISION_SUB_PICK_MOVE_XY:
+            if (VisionFlow_XYPathReached())
+            {
+                set_z(vision_pick_table[vision_item_index].pick.z_counts);
+                vision_sub = VISION_SUB_PICK_DOWN;
+            }
+            break;
+
+        case VISION_SUB_PICK_DOWN:
+            if (Z_IsReached(FLOW_TOL_Z))
+            {
+                ClawClose();
+                vision_sub = VISION_SUB_PICK_CLAW_CLOSE;
+            }
+            break;
+
+        case VISION_SUB_PICK_CLAW_CLOSE:
+            if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
+            {
+                set_z(Z_TOP);
+                vision_sub = VISION_SUB_PICK_LIFT_AFTER;
+            }
+            break;
+
+        case VISION_SUB_PICK_LIFT_AFTER:
+            if (Z_IsReached(FLOW_TOL_Z))
+            {
+                const box_t *place = &vision_place_table[vision_item_index];
+                VisionFlow_StartXYPath(place->x_counts, place->y_counts);
+                vision_sub = VISION_SUB_PLACE_MOVE_XY;
+            }
+            break;
+
+        case VISION_SUB_PLACE_MOVE_XY:
+            if (VisionFlow_XYPathReached())
+            {
+                YawSetTarget(vision_place_table[vision_item_index].yaw_counts);
+                vision_sub = VISION_SUB_PLACE_YAW;
+            }
+            break;
+
+        case VISION_SUB_PLACE_YAW:
+            if (Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
+            {
+                set_z(vision_place_table[vision_item_index].z_counts);
+                vision_sub = VISION_SUB_PLACE_DOWN;
+            }
+            break;
+
+        case VISION_SUB_PLACE_DOWN:
+            if (Z_IsReached(FLOW_TOL_Z))
+            {
+                ClawOpen();
+                vision_sub = VISION_SUB_PLACE_CLAW_OPEN;
+            }
+            break;
+
+        case VISION_SUB_PLACE_CLAW_OPEN:
+            if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
+            {
+                set_z(Z_TOP);
+                vision_sub = VISION_SUB_PLACE_LIFT_AFTER;
+            }
+            break;
+
+        case VISION_SUB_PLACE_LIFT_AFTER:
+            if (Z_IsReached(FLOW_TOL_Z))
+            {
+                YawOpen();
+                vision_sub = VISION_SUB_PLACE_YAW_RESET;
+            }
+            break;
+
+        case VISION_SUB_PLACE_YAW_RESET:
+            if (Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
+            {
+                vision_item_index++;
+                if (vision_item_index < VISION_ITEM_NUM)
+                {
+                    VisionFlow_StartPickPlace();
+                }
+                else
+                {
+                    VisionFlow_StartXYPath(FLOW_X_HOME, 0);
+                    vision_sub = VISION_SUB_RETURN_MOVE_HOME;
+                }
+            }
+            break;
+
+        case VISION_SUB_RETURN_MOVE_HOME:
+            if (VisionFlow_XYPathReached())
+            {
+                set_z(FLOW_Z_BOTTOM);
+                vision_sub = VISION_SUB_RETURN_DOWN_BOTTOM;
+            }
+            break;
+
+        case VISION_SUB_RETURN_DOWN_BOTTOM:
+            if (Z_IsReached(FLOW_TOL_Z))
+            {
+                vision_active = 0U;
+                vision_sub = VISION_SUB_DONE;
+            }
+            break;
+
+        case VISION_SUB_ERROR:
+            if (CranePath_IsActive() || vision_path_state != VISION_PATH_IDLE)
+            {
+                CranePath_Finish();
+            }
+            vision_path_state = VISION_PATH_IDLE;
+            vision_active = 0U;
+            break;
+
+        case VISION_SUB_IDLE:
+        case VISION_SUB_DONE:
+        default:
+            break;
+    }
+}
+
 /* 按键:推进到下一个大步骤。仅当上一步骤的自动接续已跑完(flow_sub==SUB_DONE)才响应,
  * 避免中途打断。走完第6步后再按 -> 从头重来。 */
 void CraneFlow_Step(void)
 {
+    if (vision_active)
+    {
+        return;
+    }
+
     if (!MotorControl_IsEnabled())
     {
         MotorControl_Enable();           /* 首次按下先使能(各轴轨迹同步到实测位置) */
@@ -474,6 +958,12 @@ void CraneFlow_Step(void)
 /* 每控制周期调用:处理大步骤内部"到位后自动接续"。跑到子序列末尾 -> SUB_DONE 等下一次按键。 */
 void CraneFlow_Tick(void)
 {
+    if (vision_active)
+    {
+        CraneFlow_VisionTick();
+        return;
+    }
+
     switch (flow_sub)
     {
         /* 按1 */
@@ -690,6 +1180,7 @@ void DataCanSend(void)
  *   —— 看 ch3:若全程贴近 0,说明左右同步良好;若发散,说明仍不同步。
  * 否则:监视单轴 VOFA_WATCH_AXIS 的 实际速度/目标速度/实际位置/目标位置。 */
 #define VOFA_WATCH_GANTRY_SYNC   0
+#define VOFA_UART8_REPORT_ENABLE 0
 
 void MotorVofaReport(void)
 {
@@ -716,7 +1207,9 @@ void MotorVofaReport(void)
 
 void MotorSysTask(void)
 {
+#if VOFA_UART8_REPORT_ENABLE
     static uint8_t vofa_div = 0U;
+#endif
 
     if (!motor_control_enable)
     {
@@ -743,10 +1236,12 @@ void MotorSysTask(void)
         DataCanSend();
     }
 
+#if VOFA_UART8_REPORT_ENABLE
     /* vofa 始终发送:500Hz 控制循环分频到 250Hz */
     if (++vofa_div >= VOFA_REPORT_DIVIDER)
     {
         vofa_div = 0U;
         MotorVofaReport();
     }
+#endif
 }
