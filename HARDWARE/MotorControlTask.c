@@ -444,9 +444,9 @@ static uint8_t GantryReached(int32_t tol)
 /* ============================================================================
  * Vision coordinated flow
  * ----------------------------------------------------------------------------
- * Classification order is owned by STM32 motion: visit fixed pick positions
- * 1 -> 2 -> 3 and send "s" after each item is in the classification pose.
- * MATCH only fills the destination places for those already-classified items.
+ * Classification travel order: 2 -> 3 -> 1; pick order: 1 -> 3 -> 2.
+ * MATCH positions arrive in classification order and are remapped below to the
+ * fixed item indexes before the independent pick order is applied.
  * ============================================================================ */
 #define VISION_ITEM_NUM     3U
 #define FLOW_TOL_Y          15000
@@ -487,6 +487,8 @@ static const mission_t vision_pick_table[VISION_ITEM_NUM] =
     { BOX_PICK_2, BOX_PLACE_4 },
     { BOX_PICK_3, BOX_PLACE_4 },
 };
+static const uint8_t vision_sample_order[VISION_ITEM_NUM] = { 1U, 2U, 0U };
+static const uint8_t vision_pick_order[VISION_ITEM_NUM] = { 0U, 2U, 1U };
 static box_t vision_place_table[VISION_ITEM_NUM];
 
 typedef enum
@@ -713,9 +715,9 @@ void CraneFlow_OnVisionClassifyDone(void)
 
 void CraneFlow_OnVisionMatch(uint8_t pos1, uint8_t pos2, uint8_t pos3)
 {
-    if (!VisionPosition_GetPlace(pos1, &vision_place_table[0]) ||
-        !VisionPosition_GetPlace(pos2, &vision_place_table[1]) ||
-        !VisionPosition_GetPlace(pos3, &vision_place_table[2]))
+    if (!VisionPosition_GetPlace(pos1, &vision_place_table[vision_sample_order[0]]) ||
+        !VisionPosition_GetPlace(pos2, &vision_place_table[vision_sample_order[1]]) ||
+        !VisionPosition_GetPlace(pos3, &vision_place_table[vision_sample_order[2]]))
     {
         vision_sub = VISION_SUB_ERROR;
         return;
@@ -739,7 +741,7 @@ static void CraneFlow_VisionTick(void)
         case VISION_SUB_SAMPLE_LIFT_TOP:
             if (Z_IsReached(FLOW_TOL_Z) && Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
             {
-                const box_t *pick = &vision_pick_table[vision_sample_index].pick;
+                const box_t *pick = &vision_pick_table[vision_sample_order[vision_sample_index]].pick;
                 VisionFlow_StartXYPath(pick->x_counts, pick->y_counts);
                 vision_sub = VISION_SUB_SAMPLE_MOVE_XY;
             }
@@ -791,7 +793,7 @@ static void CraneFlow_VisionTick(void)
         case VISION_SUB_PICK_LIFT_TOP:
             if (Z_IsReached(FLOW_TOL_Z) && Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
             {
-                const box_t *pick = &vision_pick_table[vision_item_index].pick;
+                const box_t *pick = &vision_pick_table[vision_pick_order[vision_item_index]].pick;
                 VisionFlow_StartXYPath(pick->x_counts, pick->y_counts);
                 vision_sub = VISION_SUB_PICK_MOVE_XY;
             }
@@ -800,7 +802,7 @@ static void CraneFlow_VisionTick(void)
         case VISION_SUB_PICK_MOVE_XY:
             if (VisionFlow_XYPathReached())
             {
-                set_z(vision_pick_table[vision_item_index].pick.z_counts);
+                set_z(vision_pick_table[vision_pick_order[vision_item_index]].pick.z_counts);
                 vision_sub = VISION_SUB_PICK_DOWN;
             }
             break;
@@ -824,7 +826,7 @@ static void CraneFlow_VisionTick(void)
         case VISION_SUB_PICK_LIFT_AFTER:
             if (Z_IsReached(FLOW_TOL_Z))
             {
-                const box_t *place = &vision_place_table[vision_item_index];
+                const box_t *place = &vision_place_table[vision_pick_order[vision_item_index]];
                 VisionFlow_StartXYPath(place->x_counts, place->y_counts);
                 vision_sub = VISION_SUB_PLACE_MOVE_XY;
             }
@@ -833,7 +835,7 @@ static void CraneFlow_VisionTick(void)
         case VISION_SUB_PLACE_MOVE_XY:
             if (VisionFlow_XYPathReached())
             {
-                YawSetTarget(vision_place_table[vision_item_index].yaw_counts);
+                YawSetTarget(vision_place_table[vision_pick_order[vision_item_index]].yaw_counts);
                 vision_sub = VISION_SUB_PLACE_YAW;
             }
             break;
@@ -841,7 +843,7 @@ static void CraneFlow_VisionTick(void)
         case VISION_SUB_PLACE_YAW:
             if (Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
             {
-                set_z(vision_place_table[vision_item_index].z_counts);
+                set_z(vision_place_table[vision_pick_order[vision_item_index]].z_counts);
                 vision_sub = VISION_SUB_PLACE_DOWN;
             }
             break;

@@ -97,15 +97,15 @@ extern moto_measure_t Motor[MOTOR_NUM];  /* CAN 回传的电机原始数据 */
 /* ---- 滑行电机(SLIDE_Y)八个固定位置 ----
  * 货箱3个位置(取货区):① +Y, ③ 中线, ② -Y
  * 空货箱5个位置(放置区):④ +Y, ⑤ +Y/2, ⑥ 中线, ⑦ -Y/2, ⑧ -Y
- * Y 换算尚未标定,暂用 MAP_Y_TODO 占位;标定后改为 Y_MM_TO_COUNTS() 宏。 */
-#define SLIDE_Y_POS_1      500426   /* 货箱①(取货区 +Y) */
-#define SLIDE_Y_POS_3      0   /* 货箱③(取货区中线) */
-#define SLIDE_Y_POS_2      -499801   /* 货箱②(取货区 -Y) */
-#define SLIDE_Y_POS_4      MAP_Y_TODO   /* 空货箱④(放置区 +Y) */
-#define SLIDE_Y_POS_5      MAP_Y_TODO   /* 空货箱⑤(放置区 +Y/2) */
-#define SLIDE_Y_POS_6      MAP_Y_TODO   /* 空货箱⑥(放置区中线) */
-#define SLIDE_Y_POS_7      MAP_Y_TODO   /* 空货箱⑦(放置区 -Y/2) */
-#define SLIDE_Y_POS_8      MAP_Y_TODO   /* 空货箱⑧(放置区 -Y) */
+ * 全部直接复用 MapCoords.h 的实测 Y counts,避免手动/视觉流程出现两套点位。 */
+#define SLIDE_Y_POS_1      PICK_1_Y_COUNTS    /* 货箱①(取货区 +Y) */
+#define SLIDE_Y_POS_3      PICK_3_Y_COUNTS    /* 货箱③(取货区中线) */
+#define SLIDE_Y_POS_2      PICK_2_Y_COUNTS    /* 货箱②(取货区 -Y) */
+#define SLIDE_Y_POS_4      PLACE_4_Y_COUNTS   /* 空货箱④(放置区 +Y) */
+#define SLIDE_Y_POS_5      PLACE_5_Y_COUNTS   /* 空货箱⑤(放置区 +Y/2) */
+#define SLIDE_Y_POS_6      PLACE_6_Y_COUNTS   /* 空货箱⑥(放置区中线) */
+#define SLIDE_Y_POS_7      PLACE_7_Y_COUNTS   /* 空货箱⑦(放置区 -Y/2) */
+#define SLIDE_Y_POS_8      PLACE_8_Y_COUNTS   /* 空货箱⑧(放置区 -Y) */
 
 /* vofa 监视:选要画曲线的轴(实际速度/目标速度/实际位置/目标位置 4 通道) */
 #define VOFA_WATCH_AXIS    AXIS_LIFT_Z
