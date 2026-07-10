@@ -44,11 +44,11 @@ typedef struct
 #define MAP_XCAL_P3    ( 1860000)
 
 /* ---- 升降高度(counts,越负越高) ---- */
-#define Z_TOP_TRAVEL    (-317467)   /* 最高运输/扫描位置 */
-#define Z_LAYER_1       (-58970)    /* ② 第三高:下 1 盒纸箱 */
-#define Z_LAYER_2       (-99655)    /* ① 第二高:下 2 盒纸箱 */
-#define Z_LAYER_3       (-142959)   /* ③ 第一高:下 3 盒纸箱 */
-#define Z_PLACE         (-36243)    /* 旧手动流程通用放货高度 */
+#define Z_TOP_TRAVEL    (-300000)   /* 最高运输/扫描位置 */
+#define Z_LAYER_1       (-100000)   /* ① 点位探测/抓取高度 */
+#define Z_LAYER_2       (-140000)   /* ② 点位探测/抓取高度 */
+#define Z_LAYER_3       (-183000)   /* ③ 点位探测/抓取高度 */
+#define Z_PLACE         (-75000)    /* ④～⑧统一放货高度 */
 #define Z_BOTTOM        (0)
 
 #define POSE_YAW_ZERO   (0)
@@ -57,9 +57,9 @@ typedef struct
 #define PICK_1_Y_COUNTS    ( 511698)
 #define PICK_2_Y_COUNTS    (-524778)
 #define PICK_3_Y_COUNTS    (   5851)
-#define BOX_PICK_1   { -2176922, PICK_1_Y_COUNTS, Z_LAYER_2, POSE_YAW_ZERO }  /* ① 白芸豆,第二高 */
-#define BOX_PICK_2   { -2176920, PICK_2_Y_COUNTS, Z_LAYER_1, POSE_YAW_ZERO }  /* ② 绿豆,第三高   */
-#define BOX_PICK_3   { -1893572, PICK_3_Y_COUNTS, Z_LAYER_3, POSE_YAW_ZERO }  /* ③ 黄豆,第一高   */
+#define BOX_PICK_1   { -2176922, PICK_1_Y_COUNTS, Z_LAYER_1, POSE_YAW_ZERO }  /* ① 白芸豆 */
+#define BOX_PICK_2   { -2176920, PICK_2_Y_COUNTS, Z_LAYER_2, POSE_YAW_ZERO }  /* ② 绿豆   */
+#define BOX_PICK_3   { -1893572, PICK_3_Y_COUNTS, Z_LAYER_3, POSE_YAW_ZERO }  /* ③ 黄豆   */
 
 /* ---- 放置区实测点位 ---- */
 #define PLACE_4_Y_COUNTS   ( 902867)
@@ -67,24 +67,37 @@ typedef struct
 #define PLACE_6_Y_COUNTS   (   9348)
 #define PLACE_7_Y_COUNTS   (-420153)
 #define PLACE_8_Y_COUNTS   (-916231)
-#define BOX_PLACE_4  { 1509918, PLACE_4_Y_COUNTS, -77957,  96336 }
-#define BOX_PLACE_5  { 1753683, PLACE_5_Y_COUNTS, -68465,  POSE_YAW_ZERO }
-#define BOX_PLACE_6  { 1753682, PLACE_6_Y_COUNTS, -62618,  POSE_YAW_ZERO }
-#define BOX_PLACE_7  { 1753684, PLACE_7_Y_COUNTS, -45950,  POSE_YAW_ZERO }
-#define BOX_PLACE_8  { 1509917, PLACE_8_Y_COUNTS, -83679, 100915 }
+#define BOX_PLACE_4  { 1509918, PLACE_4_Y_COUNTS, Z_PLACE,  96336 }
+#define BOX_PLACE_5  { 1753683, PLACE_5_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
+#define BOX_PLACE_6  { 1753682, PLACE_6_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
+#define BOX_PLACE_7  { 1753684, PLACE_7_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
+#define BOX_PLACE_8  { 1509917, PLACE_8_Y_COUNTS, Z_PLACE, 100915 }
 
 /* 规则图 S 形路径:
- *   豆侧左柱走负 Y,奶箱侧右柱走正 Y。
- * 两张柱边截图只采用龙门左右电机得到 X;Y 分别复用有效的⑦/⑤点位。 */
-#define DETOUR_BEAN_X_COUNTS    (-1251279)
-#define DETOUR_BEAN_Y_COUNTS    (-420153)
-#define DETOUR_BOX_X_COUNTS     (828350)
-#define DETOUR_BOX_Y_COUNTS     (427058)
-#define DETOUR_BEAN_PT          { DETOUR_BEAN_X_COUNTS, DETOUR_BEAN_Y_COUNTS }
-#define DETOUR_BOX_PT           { DETOUR_BOX_X_COUNTS,  DETOUR_BOX_Y_COUNTS  }
+ *   左柱走负 Y,右柱走正 Y。两个 X 值均为圆柱中心,Y 均为场地中线 0。
+ *   150mm × X/Y 实测平均比例 ≈ 158394 counts,即约 1055.96 counts/mm。 */
+#define MAP_COUNTS_PER_MM               1055.96f
 
-/* 150mm × X/Y 实测平均比例 ≈ 158394 counts。 */
-#define PATH_CORNER_BLEND_COUNTS  158394.0f
+#define OBSTACLE_BEAN_X_COUNTS          (-1251279)
+#define OBSTACLE_BEAN_Y_COUNTS          (0)
+#define OBSTACLE_BOX_X_COUNTS           (828350)
+#define OBSTACLE_BOX_Y_COUNTS           (0)
+
+/* 夹具/货物安全包络:
+ * 51mm 圆柱半径 + 200mm 货物半径 + 50mm 静态余量 + 50mm 制动余量 = 351mm。 */
+#define OBSTACLE_RADIUS_COUNTS           53854.0f
+#define PAYLOAD_RADIUS_COUNTS           211192.0f
+#define OBSTACLE_STATIC_MARGIN_COUNTS    52798.0f
+#define OBSTACLE_BRAKE_MARGIN_COUNTS     52798.0f
+#define OBSTACLE_CLEARANCE_COUNTS        370642.0f
+
+/* 每根圆柱使用前后两个门点。门点 X 距圆心 300mm,Y 沿用已验证的⑦/⑤位置。 */
+#define OBSTACLE_GATE_HALF_X_COUNTS      316788
+#define DETOUR_BEAN_Y_COUNTS             (-420153)
+#define DETOUR_BOX_Y_COUNTS              (427058)
+
+/* 150mm 拐角圆弧。 */
+#define PATH_CORNER_BLEND_COUNTS         158394.0f
 
 /* 用户可编辑的默认任务表。视觉模式下实际 place 由 MATCH 数据覆盖。 */
 #define MISSION_TABLE  { \

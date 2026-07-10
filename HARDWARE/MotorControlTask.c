@@ -7,6 +7,10 @@
 #include "VisionComm.h"
 #include "VisionPositionMap.h"
 
+#include <math.h>
+
+#define GANTRY_SYNC_FAULT_COUNTS      20000
+
 /* ============================================================================
  * 编译期配置表 —— 每个轴一行,改参数只改这里
  *   V/A/J 用输出轴 RPM 量纲(见 MotorControlTask.h 换算说明)
@@ -20,7 +24,7 @@
  * ============================================================================ */
 axis_cfg_t axis_cfg[AXIS_NUM] =
 {
-    /* AXIS_GANTRY_L (0x201) 龙门左,X —— 高速大行程,沿用已验证 nice 的那套 */
+    /* AXIS_GANTRY_L (0x201) 龙门左,X —— 恢复已验证的独立轨迹参数 */
     { 0, -1, MOTOR_REDUCTION_RATIO_3508,
       350.0f, 305.0f, 3052.0f,
       0.004f, 0.0f, 0.0f, 170u, 10u,
@@ -32,15 +36,15 @@ axis_cfg_t axis_cfg[AXIS_NUM] =
       0.004f, 0.0f, 0.0f, 170u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
-    /* AXIS_SLIDE_Y (0x203) 滑行,Y —— 高速 */
+    /* AXIS_SLIDE_Y (0x203) 滑行,Y —— 直移与 XY 路径共用此组约束 */
     { 2, +1, MOTOR_REDUCTION_RATIO_3508,
-      300.0f, 1200.0f, 6000.0f,
+      100.0f, 200.0f, 1200.0f,
       0.004f, 0.0f, 0.0f, 170u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
-    /* AXIS_LIFT_Z (0x204) 升降,Z —— 小行程柔和;Vmax 测试改 100 RPM */
+    /* AXIS_LIFT_Z (0x204) 升降,Z —— V 保持不变,A/J 比上一版提高一倍 */
     { 3, +1, MOTOR_REDUCTION_RATIO_3508,
-      100.0f, 240.0f, 1500.0f,
+      100.0f, 320.0f, 1600.0f,
       0.004f, 0.0f, 0.0f, 100u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
@@ -59,6 +63,7 @@ axis_cfg_t axis_cfg[AXIS_NUM] =
 
 axis_t          axis[AXIS_NUM];
 moto_measure_t  Motor[MOTOR_NUM];
+volatile motor_diag_t MotorDiag = {0};
 
 static uint8_t motor_control_enable = 0U;
 
@@ -94,14 +99,14 @@ void Axis_InitAll(void)
         axis[i].target = 0;
     }
 
-    /* XY 联动路径插值器:弧长 S 曲线的 V/A/J 取保守值(沿路径合速度的 counts 量纲)。
-     * ⚠ 合速度会按切向分解到 X、Y,任一分量不得超该轴上限。这里先用 SLIDE_Y 的约束
-     *   作为合速度上限(Y 通常是较慢/较短的一轴),联调时按实际路径再调。 */
+    /* XY 联动路径与水平滑台共用 V/A/J。 */
     XYPath_Init(&crane_path,
                 axis_cfg[AXIS_SLIDE_Y].vmax_rpm * TRAJ_RPM_TO_COUNTS,
                 axis_cfg[AXIS_SLIDE_Y].amax_rpm * TRAJ_RPM_TO_COUNTS,
                 axis_cfg[AXIS_SLIDE_Y].jmax_rpm * TRAJ_RPM_TO_COUNTS,
                 MOTOR_CONTROL_PERIOD);
+
+    MotorDiag.fault_code = MOTOR_FAULT_NONE;
 }
 
 /* 读某轴实测位置(dir 校正,与轨迹/目标同坐标系) */
@@ -109,6 +114,13 @@ int32_t Axis_GetPos(axis_id_t id)
 {
     const axis_cfg_t *c = &axis_cfg[id];
     return c->dir * Motor[c->can_index].total_angle;
+}
+
+static int32_t Gantry_GetAveragePos(void)
+{
+    int32_t left = Axis_GetPos(AXIS_GANTRY_L);
+    int32_t right = Axis_GetPos(AXIS_GANTRY_R);
+    return (int32_t)(((int64_t)left + (int64_t)right) / 2);
 }
 
 uint8_t Axis_IsBusy(axis_id_t id)
@@ -123,7 +135,7 @@ uint8_t Axis_IsReached(axis_id_t id, int32_t tol_counts)
 {
     int32_t err;
 
-    if (TrajTrack_IsBusy(&axis[id].traj))
+    if (Axis_IsBusy(id))
     {
         return 0U;                      /* 轨迹还在跑 */
     }
@@ -142,7 +154,7 @@ void Axis_SetTarget(axis_id_t id, int32_t target)
     TrajTrack_SetTarget(&axis[id].traj, (float)target);
 }
 
-/* 同时给龙门架左右同一个 X 目标,保证两侧同步 */
+/* 同时给左右龙门相同 X 终点,两侧各自规划独立轨迹。 */
 void Axis_SetTargetXGantry(int32_t x)
 {
     Axis_SetTarget(AXIS_GANTRY_L, x);
@@ -160,17 +172,52 @@ void Axis_SetTargetXGantry(int32_t x)
 
 /* 构建并启动一条路径。pts 为 counts 域航点(map_pt_t),blend 为拐角圆弧半径 counts。
  * 启动瞬间把 X/Y 各轴 traj 同步到实测位置,避免收尾切换时跳变。 */
-void CranePath_Run(const map_pt_t *pts, uint8_t num, float blend_radius)
+uint8_t CranePath_Run(const map_pt_t *pts, uint8_t num, float blend_radius)
 {
+    float bean_clearance;
+    float box_clearance;
+    uint8_t bean_ok;
+    uint8_t box_ok;
+
+    if (!XYPath_Build(&crane_path, pts, num, blend_radius))
+    {
+        MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
+        MotorDiag.path_min_clearance = 0.0f;
+        XYPath_Stop(&crane_path);
+        MotorControl_Stop();
+        return 0U;
+    }
+
+    bean_ok = XYPath_ValidateClearance(&crane_path,
+                                       (float)OBSTACLE_BEAN_X_COUNTS,
+                                       (float)OBSTACLE_BEAN_Y_COUNTS,
+                                       OBSTACLE_CLEARANCE_COUNTS,
+                                       &bean_clearance);
+    box_ok = XYPath_ValidateClearance(&crane_path,
+                                      (float)OBSTACLE_BOX_X_COUNTS,
+                                      (float)OBSTACLE_BOX_Y_COUNTS,
+                                      OBSTACLE_CLEARANCE_COUNTS,
+                                      &box_clearance);
+    MotorDiag.path_min_clearance = (bean_clearance < box_clearance) ? bean_clearance : box_clearance;
+
+    if (!bean_ok || !box_ok)
+    {
+        MotorDiag.fault_code = MOTOR_FAULT_PATH_CLEARANCE;
+        XYPath_Stop(&crane_path);
+        MotorControl_Stop();
+        return 0U;
+    }
+
     if (!MotorControl_IsEnabled())
     {
         MotorControl_Enable();
     }
 
-    XYPath_Build(&crane_path, pts, num, blend_radius);
     XYPath_Start(&crane_path,
-                 (float)Axis_GetPos(AXIS_GANTRY_L),
+                 (float)Gantry_GetAveragePos(),
                  (float)Axis_GetPos(AXIS_SLIDE_Y));
+    MotorDiag.fault_code = MOTOR_FAULT_NONE;
+    return 1U;
 }
 
 uint8_t CranePath_IsActive(void)
@@ -191,7 +238,7 @@ void CranePath_Finish(void)
 
     int32_t xl = Axis_GetPos(AXIS_GANTRY_L);
     int32_t xr = Axis_GetPos(AXIS_GANTRY_R);
-    int32_t y  = Axis_GetPos(AXIS_SLIDE_Y);
+    int32_t y = Axis_GetPos(AXIS_SLIDE_Y);
 
     axis[AXIS_GANTRY_L].target = xl;
     TrajTrack_Reset(&axis[AXIS_GANTRY_L].traj, (float)xl);
@@ -352,14 +399,14 @@ uint8_t Z_IsReached(int32_t tol_counts)
 static const int32_t z_height_points[Z_HEIGHT_NUM] =
 {
     Z_TOP,     /* 抬顶(去三层前) */
-    -142959,   /* 第三层 */
+    Z_LAYER_3, /* 第三点位 */
     Z_TOP,     /* 抬顶(去二层前) */
-    -99655,    /* 第二层 */
+    Z_LAYER_2, /* 第二点位 */
     Z_TOP,     /* 抬顶(去一层前) */
-    -58970,    /* 第一层 */
-    -36243,    /* 放货高度(与 FLOW_Z_PLACE 对齐,原 -87476 为过时旧值) */
+    Z_LAYER_1, /* 第一点位 */
+    Z_PLACE,   /* 放货高度 */
     Z_TOP,     /* 放货后抬顶 */
-    0,         /* 回 Z0(上电高度) */
+    Z_BOTTOM,  /* 回 Z0(上电高度) */
 };
 static uint8_t z_height_index = 0U;   /* 下一个要去的高度下标 */
 
@@ -398,9 +445,9 @@ void ZHeightStep(void)
  *
  * 全程保持使能(Z 升降轴不失能,避免重力掉落)。
  * ============================================================================ */
-#define FLOW_Z_LEVEL3      (-142959)   /* 第三层 */
-#define FLOW_Z_PLACE       (-36243)    /* 放货高度 */
-#define FLOW_Z_BOTTOM      (0)         /* 底部 = 上电 Z0 */
+#define FLOW_Z_LEVEL3      Z_LAYER_3   /* 第三点位 */
+#define FLOW_Z_PLACE       Z_PLACE     /* 放货高度 */
+#define FLOW_Z_BOTTOM      Z_BOTTOM    /* 底部 = 上电 Z0 */
 #define FLOW_X_HOME        (0)         /* 原点 = 上电 X0 */
 
 /* 到位容差(分轴):X 行程大给宽些,Z 中等,爪行程很大给最宽 */
@@ -498,7 +545,7 @@ typedef enum
     VISION_ZONE_RIGHT,
 } vision_zone_t;
 
-#define VISION_PATH_MAX_POINTS  4U
+#define VISION_PATH_MAX_POINTS  6U
 
 typedef enum
 {
@@ -539,22 +586,50 @@ static uint8_t VisionFlow_XYAtTarget(int32_t x_counts, int32_t y_counts)
 
 static vision_zone_t VisionFlow_GetZone(int32_t x_counts)
 {
-    if (x_counts < DETOUR_BEAN_X_COUNTS)
+    if (x_counts < OBSTACLE_BEAN_X_COUNTS)
     {
         return VISION_ZONE_LEFT;
     }
-    if (x_counts > DETOUR_BOX_X_COUNTS)
+    if (x_counts > OBSTACLE_BOX_X_COUNTS)
     {
         return VISION_ZONE_RIGHT;
     }
     return VISION_ZONE_MIDDLE;
 }
 
-static void VisionFlow_StartXYPath(int32_t x_counts, int32_t y_counts)
+static uint8_t VisionFlow_AddObstacleGate(int32_t center_x, int32_t gate_y,
+                                          int8_t direction, uint8_t *point_num)
 {
-    int32_t pos_l = Axis_GetPos(AXIS_GANTRY_L);
-    int32_t pos_r = Axis_GetPos(AXIS_GANTRY_R);
-    int32_t start_x = (int32_t)(((int64_t)pos_l + (int64_t)pos_r) / 2);
+    if (point_num == 0 || *point_num > (VISION_PATH_MAX_POINTS - 2U))
+    {
+        return 0U;
+    }
+
+    if (direction > 0)
+    {
+        vision_path_points[*point_num].x = center_x - OBSTACLE_GATE_HALF_X_COUNTS;
+        vision_path_points[*point_num].y = gate_y;
+        (*point_num)++;
+        vision_path_points[*point_num].x = center_x + OBSTACLE_GATE_HALF_X_COUNTS;
+        vision_path_points[*point_num].y = gate_y;
+        (*point_num)++;
+    }
+    else
+    {
+        vision_path_points[*point_num].x = center_x + OBSTACLE_GATE_HALF_X_COUNTS;
+        vision_path_points[*point_num].y = gate_y;
+        (*point_num)++;
+        vision_path_points[*point_num].x = center_x - OBSTACLE_GATE_HALF_X_COUNTS;
+        vision_path_points[*point_num].y = gate_y;
+        (*point_num)++;
+    }
+
+    return 1U;
+}
+
+static uint8_t VisionFlow_StartXYPath(int32_t x_counts, int32_t y_counts)
+{
+    int32_t start_x = Gantry_GetAveragePos();
     int32_t start_y = Axis_GetPos(AXIS_SLIDE_Y);
     vision_zone_t start_zone = VisionFlow_GetZone(start_x);
     vision_zone_t target_zone = VisionFlow_GetZone(x_counts);
@@ -571,7 +646,7 @@ static void VisionFlow_StartXYPath(int32_t x_counts, int32_t y_counts)
     if (VisionFlow_XYAtTarget(x_counts, y_counts))
     {
         vision_path_state = VISION_PATH_IDLE;
-        return;
+        return 1U;
     }
 
     if (start_x == x_counts && start_y == y_counts)
@@ -579,7 +654,7 @@ static void VisionFlow_StartXYPath(int32_t x_counts, int32_t y_counts)
         Axis_SetTargetXGantry(x_counts);
         Axis_SetTarget(AXIS_SLIDE_Y, y_counts);
         vision_path_state = VISION_PATH_DIRECT;
-        return;
+        return 1U;
     }
 
     vision_path_points[point_num].x = start_x;
@@ -590,37 +665,66 @@ static void VisionFlow_StartXYPath(int32_t x_counts, int32_t y_counts)
     {
         if (start_zone == VISION_ZONE_LEFT)
         {
-            vision_path_points[point_num].x = DETOUR_BEAN_X_COUNTS;
-            vision_path_points[point_num].y = DETOUR_BEAN_Y_COUNTS;
-            point_num++;
+            if (!VisionFlow_AddObstacleGate(OBSTACLE_BEAN_X_COUNTS,
+                                            DETOUR_BEAN_Y_COUNTS, +1, &point_num))
+            {
+                MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
+                MotorControl_Stop();
+                return 0U;
+            }
         }
         if (target_zone == VISION_ZONE_RIGHT)
         {
-            vision_path_points[point_num].x = DETOUR_BOX_X_COUNTS;
-            vision_path_points[point_num].y = DETOUR_BOX_Y_COUNTS;
-            point_num++;
+            if (!VisionFlow_AddObstacleGate(OBSTACLE_BOX_X_COUNTS,
+                                            DETOUR_BOX_Y_COUNTS, +1, &point_num))
+            {
+                MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
+                MotorControl_Stop();
+                return 0U;
+            }
         }
     }
     else if (start_zone > target_zone)
     {
         if (start_zone == VISION_ZONE_RIGHT)
         {
-            vision_path_points[point_num].x = DETOUR_BOX_X_COUNTS;
-            vision_path_points[point_num].y = DETOUR_BOX_Y_COUNTS;
-            point_num++;
+            if (!VisionFlow_AddObstacleGate(OBSTACLE_BOX_X_COUNTS,
+                                            DETOUR_BOX_Y_COUNTS, -1, &point_num))
+            {
+                MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
+                MotorControl_Stop();
+                return 0U;
+            }
         }
         if (target_zone == VISION_ZONE_LEFT)
         {
-            vision_path_points[point_num].x = DETOUR_BEAN_X_COUNTS;
-            vision_path_points[point_num].y = DETOUR_BEAN_Y_COUNTS;
-            point_num++;
+            if (!VisionFlow_AddObstacleGate(OBSTACLE_BEAN_X_COUNTS,
+                                            DETOUR_BEAN_Y_COUNTS, -1, &point_num))
+            {
+                MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
+                MotorControl_Stop();
+                return 0U;
+            }
         }
+    }
+
+    if (point_num >= VISION_PATH_MAX_POINTS)
+    {
+        MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
+        MotorControl_Stop();
+        return 0U;
     }
 
     vision_path_points[point_num] = vision_path_target;
     point_num++;
+    if (!CranePath_Run(vision_path_points, point_num, PATH_CORNER_BLEND_COUNTS))
+    {
+        vision_path_state = VISION_PATH_IDLE;
+        return 0U;
+    }
+
     vision_path_state = VISION_PATH_ACTIVE;
-    CranePath_Run(vision_path_points, point_num, PATH_CORNER_BLEND_COUNTS);
+    return 1U;
 }
 
 static uint8_t VisionFlow_XYPathReached(void)
@@ -742,8 +846,14 @@ static void CraneFlow_VisionTick(void)
             if (Z_IsReached(FLOW_TOL_Z) && Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
             {
                 const box_t *pick = &vision_pick_table[vision_sample_order[vision_sample_index]].pick;
-                VisionFlow_StartXYPath(pick->x_counts, pick->y_counts);
-                vision_sub = VISION_SUB_SAMPLE_MOVE_XY;
+                if (VisionFlow_StartXYPath(pick->x_counts, pick->y_counts))
+                {
+                    vision_sub = VISION_SUB_SAMPLE_MOVE_XY;
+                }
+                else
+                {
+                    vision_sub = VISION_SUB_ERROR;
+                }
             }
             break;
 
@@ -794,8 +904,14 @@ static void CraneFlow_VisionTick(void)
             if (Z_IsReached(FLOW_TOL_Z) && Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
             {
                 const box_t *pick = &vision_pick_table[vision_pick_order[vision_item_index]].pick;
-                VisionFlow_StartXYPath(pick->x_counts, pick->y_counts);
-                vision_sub = VISION_SUB_PICK_MOVE_XY;
+                if (VisionFlow_StartXYPath(pick->x_counts, pick->y_counts))
+                {
+                    vision_sub = VISION_SUB_PICK_MOVE_XY;
+                }
+                else
+                {
+                    vision_sub = VISION_SUB_ERROR;
+                }
             }
             break;
 
@@ -827,8 +943,14 @@ static void CraneFlow_VisionTick(void)
             if (Z_IsReached(FLOW_TOL_Z))
             {
                 const box_t *place = &vision_place_table[vision_pick_order[vision_item_index]];
-                VisionFlow_StartXYPath(place->x_counts, place->y_counts);
-                vision_sub = VISION_SUB_PLACE_MOVE_XY;
+                if (VisionFlow_StartXYPath(place->x_counts, place->y_counts))
+                {
+                    vision_sub = VISION_SUB_PLACE_MOVE_XY;
+                }
+                else
+                {
+                    vision_sub = VISION_SUB_ERROR;
+                }
             }
             break;
 
@@ -882,8 +1004,14 @@ static void CraneFlow_VisionTick(void)
                 }
                 else
                 {
-                    VisionFlow_StartXYPath(FLOW_X_HOME, 0);
-                    vision_sub = VISION_SUB_RETURN_MOVE_HOME;
+                    if (VisionFlow_StartXYPath(FLOW_X_HOME, 0))
+                    {
+                        vision_sub = VISION_SUB_RETURN_MOVE_HOME;
+                    }
+                    else
+                    {
+                        vision_sub = VISION_SUB_ERROR;
+                    }
                 }
             }
             break;
@@ -909,6 +1037,7 @@ static void CraneFlow_VisionTick(void)
             {
                 CranePath_Finish();
             }
+            MotorControl_Stop();
             vision_path_state = VISION_PATH_IDLE;
             vision_active = 0U;
             break;
@@ -1060,7 +1189,7 @@ void GantryFourPointStep(void)
         gantry_loop_points[1] = X_CalPoints[1];
         gantry_loop_points[2] = X_CalPoints[2];
         gantry_loop_points[3] = X_CalPoints[3];
-        gantry_loop_points[4] = Axis_GetPos(AXIS_GANTRY_L);   /* 零点 */
+        gantry_loop_points[4] = Gantry_GetAveragePos();        /* 左右平均零点 */
         gantry_zero_captured = 1U;
     }
 
@@ -1100,6 +1229,7 @@ void MotorControl_Enable(void)
 {
     MotorTargetSync();
     MotorPidClear();
+    MotorDiag.fault_code = MOTOR_FAULT_NONE;
     motor_control_enable = 1;
 }
 
@@ -1130,18 +1260,16 @@ void MotorPidCalc(void)
         float ref;
         float ff;
 
-        /* 路径模式:X(GANTRY_L/R)与 Y(SLIDE_Y)的位置环 ref 取自 XYPath,
-         * 绕过各轴 axis[i].traj,保证末端沿确定几何路径绕障。
-         * 前馈暂置 0(后期再按 x_ff/y_ff 接入);其余轴仍走各自 traj。 */
+        /* 路径模式左右共用 x_ref;普通模式各自使用独立轨迹。 */
         if (path_on && (i == AXIS_GANTRY_L || i == AXIS_GANTRY_R))
         {
             ref = crane_path.x_ref;
-            ff  = 0.0f;
+            ff = crane_path.x_ff / RPM_TO_COUNTS_PER_SEC;
         }
         else if (path_on && i == AXIS_SLIDE_Y)
         {
             ref = crane_path.y_ref;
-            ff  = 0.0f;
+            ff = crane_path.y_ff / RPM_TO_COUNTS_PER_SEC;
         }
         else
         {
@@ -1151,12 +1279,23 @@ void MotorPidCalc(void)
             ff  = axis[i].traj.vel / RPM_TO_COUNTS_PER_SEC;
         }
 
+        if (i == AXIS_GANTRY_L)
+        {
+            MotorDiag.gantry_left_ref = ref;
+        }
+        else if (i == AXIS_GANTRY_R)
+        {
+            MotorDiag.gantry_right_ref = ref;
+        }
+
         pid_calc(&axis[i].pid_pos,
                  (float)(c->dir * Motor[c->can_index].total_angle),
                  ref);
+        float speed_ref = axis[i].pid_pos.pos_out * c->reduction + ff;
+
         pid_calc(&axis[i].pid_spd,
                  (float)(c->dir * Motor[c->can_index].speed_rpm),
-                 axis[i].pid_pos.pos_out * c->reduction + ff);
+                 speed_ref);
     }
 }
 
@@ -1191,7 +1330,7 @@ void MotorVofaReport(void)
     int32_t pos_r = Axis_GetPos(AXIS_GANTRY_R);
     float   l     = (float)pos_l;
     float   r     = (float)pos_r;
-    float   tgt   = axis[AXIS_GANTRY_L].traj.out;     /* L/R 共享同一目标 */
+    float   tgt   = XYPath_IsActive(&crane_path) ? crane_path.x_ref : axis[AXIS_GANTRY_L].traj.out;
     float   err   = (float)(pos_l - pos_r);           /* 左右同步误差 */
 
     Vofa_Send_Data4(l, r, tgt, err);
@@ -1207,6 +1346,62 @@ void MotorVofaReport(void)
 #endif
 }
 
+static float MotorDistanceToObstacle(int32_t x, int32_t y,
+                                     int32_t obstacle_x, int32_t obstacle_y)
+{
+    float dx = (float)x - (float)obstacle_x;
+    float dy = (float)y - (float)obstacle_y;
+    return sqrtf(dx * dx + dy * dy);
+}
+
+static uint8_t MotorRuntimeSafetyCheck(void)
+{
+    int32_t left = Axis_GetPos(AXIS_GANTRY_L);
+    int32_t right = Axis_GetPos(AXIS_GANTRY_R);
+    int32_t actual_x = Gantry_GetAveragePos();
+    int32_t actual_y = Axis_GetPos(AXIS_SLIDE_Y);
+    int64_t sync_error = (int64_t)left - (int64_t)right;
+    float bean_distance = MotorDistanceToObstacle(actual_x, actual_y,
+                                                   OBSTACLE_BEAN_X_COUNTS,
+                                                   OBSTACLE_BEAN_Y_COUNTS);
+    float box_distance = MotorDistanceToObstacle(actual_x, actual_y,
+                                                  OBSTACLE_BOX_X_COUNTS,
+                                                  OBSTACLE_BOX_Y_COUNTS);
+
+    MotorDiag.gantry_left_pos = left;
+    MotorDiag.gantry_right_pos = right;
+    MotorDiag.gantry_sync_error = (int32_t)sync_error;
+    MotorDiag.path_x_ref = crane_path.x_ref;
+    MotorDiag.path_y_ref = crane_path.y_ref;
+    MotorDiag.path_x_ff = crane_path.x_ff;
+    MotorDiag.path_y_ff = crane_path.y_ff;
+    MotorDiag.actual_min_clearance = (bean_distance < box_distance) ? bean_distance : box_distance;
+
+    if (sync_error > GANTRY_SYNC_FAULT_COUNTS || sync_error < -GANTRY_SYNC_FAULT_COUNTS)
+    {
+        MotorDiag.fault_code = MOTOR_FAULT_GANTRY_SYNC;
+        if (vision_active)
+        {
+            vision_sub = VISION_SUB_ERROR;
+        }
+        MotorControl_Stop();
+        return 0U;
+    }
+
+    if (MotorDiag.actual_min_clearance < OBSTACLE_CLEARANCE_COUNTS)
+    {
+        MotorDiag.fault_code = MOTOR_FAULT_RUNTIME_CLEARANCE;
+        if (vision_active)
+        {
+            vision_sub = VISION_SUB_ERROR;
+        }
+        MotorControl_Stop();
+        return 0U;
+    }
+
+    return 1U;
+}
+
 void MotorSysTask(void)
 {
 #if VOFA_UART8_REPORT_ENABLE
@@ -1220,18 +1415,23 @@ void MotorSysTask(void)
     }
     else
     {
-        /* 每个控制周期推进一次所有轴的轨迹,得到此刻瞬时目标 */
+        /* 全部轴推进各自轨迹;路径模式下 X/Y 的独立输出暂不送入位置环。 */
         for (uint8_t i = 0; i < AXIS_NUM; i++)
         {
             TrajTrack_Calc(&axis[i].traj);
         }
 
         /* 路径模式:推进弧长 S 曲线 -> 插值出 X/Y 平面 ref(MotorPidCalc 里取用)。
-         * 与 TrajTrack_Calc 同频(2ms)。X/Y 的 axis[].traj 仍在上面被推进,但路径模式下
-         * 其 out 不被 MotorPidCalc 采用,联调收尾时由 CranePath_Stop 把 traj 复位对齐。 */
+         * 与 TrajTrack_Calc 同频(2ms)。路径模式下龙门/Y 单轴轨迹不被 PID 采用,
+         * 收尾时由 CranePath_Finish 复位到实测位置。 */
         if (XYPath_IsActive(&crane_path))
         {
             XYPath_Tick(&crane_path);
+        }
+
+        if (!MotorRuntimeSafetyCheck())
+        {
+            return;
         }
 
         MotorPidCalc();

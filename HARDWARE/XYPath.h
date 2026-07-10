@@ -92,8 +92,18 @@ void XYPath_Init(xy_path_t *p, float v_max, float a_max, float j_max, float peri
 /* 用一组航点构建路径:折线连接,拐角按 blend_radius 做圆弧混合。
  *   pts/num:航点数组(counts 域,map_pt_t)。
  *   blend_radius:拐角圆弧半径(counts);0 = 纯折线(拐角处速度方向不连续)。
- *   构建后路径就绪但未启动,需再调 XYPath_Start。 */
-void XYPath_Build(xy_path_t *p, const map_pt_t *pts, uint8_t num, float blend_radius);
+ *   构建后路径就绪但未启动,需再调 XYPath_Start;返回 1 表示构建成功。
+ *   安全模式不允许自动缩小 blend_radius,空间不足时返回 0。 */
+uint8_t XYPath_Build(xy_path_t *p, const map_pt_t *pts, uint8_t num, float blend_radius);
+
+/* 解析检查整条路径到指定圆心的最小距离。
+ *   min_distance:允许的最小中心距(counts)。
+ *   actual_min_distance:可选输出实际最小中心距,可传 0。
+ * 返回 1 表示所有直线/圆弧均满足净空。 */
+uint8_t XYPath_ValidateClearance(const xy_path_t *p,
+                                 float center_x, float center_y,
+                                 float min_distance,
+                                 float *actual_min_distance);
 
 /* 启动:从当前几何起点沿 s 规划到 total_len,置 active=1。
  *   start_xy:进入路径模式瞬间的实测平面位置(counts),用于把首航点对齐到

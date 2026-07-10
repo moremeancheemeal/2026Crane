@@ -1,9 +1,12 @@
 #include "XYPath.h"
 
+#include <float.h>
 #include <math.h>
 
 /* 数值保护 */
 #define XYP_EPS   1e-4f
+#define XYP_PI    3.14159265358979323846f
+#define XYP_2PI   (2.0f * XYP_PI)
 
 /* ============================================================================
  * 内部:几何构建
@@ -88,18 +91,19 @@ void XYPath_Init(xy_path_t *p, float v_max, float a_max, float j_max, float peri
     p->active = 0U;
 }
 
-void XYPath_Build(xy_path_t *p, const map_pt_t *pts, uint8_t num, float blend_radius)
+uint8_t XYPath_Build(xy_path_t *p, const map_pt_t *pts, uint8_t num, float blend_radius)
 {
     p->seg_num   = 0;
     p->total_len = 0.0f;
+    p->active    = 0U;
 
     if (pts == 0 || num < 2U)
     {
-        return;                     /* 至少两点才成路径 */
+        return 0U;                  /* 至少两点才成路径 */
     }
     if (num > XY_PATH_MAX_WAYPOINTS)
     {
-        num = XY_PATH_MAX_WAYPOINTS;
+        return 0U;
     }
 
     float s_acc = 0.0f;
@@ -156,10 +160,12 @@ void XYPath_Build(xy_path_t *p, const map_pt_t *pts, uint8_t num, float blend_ra
         float avail_in  = xyp_hypot(px - cur_x, py - cur_y);
         float avail_out = out_len;
         float dmax = (avail_in < avail_out ? avail_in : avail_out) * 0.5f;
-        if (d > dmax)
+        if (d > dmax + XYP_EPS)
         {
-            d = dmax;
-            R = d / tanf(turn * 0.5f);           /* 半径随退让一起缩 */
+            /* 安全模式不允许偷偷缩小圆角半径,否则转弯加速度和柱距都会失真。 */
+            p->seg_num = 0U;
+            p->total_len = 0.0f;
+            return 0U;
         }
 
         /* 切点 */
@@ -194,6 +200,144 @@ void XYPath_Build(xy_path_t *p, const map_pt_t *pts, uint8_t num, float blend_ra
                           (float)pts[num - 1].x, (float)pts[num - 1].y);
 
     p->total_len = s_acc;
+    return (p->seg_num > 0U && p->total_len > XYP_EPS) ? 1U : 0U;
+}
+
+static float xyp_normalize_angle(float angle)
+{
+    while (angle < 0.0f)
+    {
+        angle += XYP_2PI;
+    }
+    while (angle >= XYP_2PI)
+    {
+        angle -= XYP_2PI;
+    }
+    return angle;
+}
+
+static uint8_t xyp_angle_on_arc(const xy_seg_t *sg, float angle)
+{
+    float sweep = sg->length / sg->radius;
+    float delta;
+
+    if (sg->ang_dir >= 0.0f)
+    {
+        delta = xyp_normalize_angle(angle - sg->ang0);
+    }
+    else
+    {
+        delta = xyp_normalize_angle(sg->ang0 - angle);
+    }
+
+    return (delta <= sweep + XYP_EPS) ? 1U : 0U;
+}
+
+static float xyp_line_distance_to_point(const xy_seg_t *sg, float px, float py)
+{
+    float dx = px - sg->x0;
+    float dy = py - sg->y0;
+    float along = dx * sg->ux + dy * sg->uy;
+
+    if (along < 0.0f)
+    {
+        along = 0.0f;
+    }
+    else if (along > sg->length)
+    {
+        along = sg->length;
+    }
+
+    return xyp_hypot(sg->x0 + sg->ux * along - px,
+                     sg->y0 + sg->uy * along - py);
+}
+
+static float xyp_arc_distance_to_point(const xy_seg_t *sg, float px, float py)
+{
+    float sweep = sg->length / sg->radius;
+    float end_angle = sg->ang0 + sg->ang_dir * sweep;
+    float start_x = sg->cx + sg->radius * cosf(sg->ang0);
+    float start_y = sg->cy + sg->radius * sinf(sg->ang0);
+    float end_x = sg->cx + sg->radius * cosf(end_angle);
+    float end_y = sg->cy + sg->radius * sinf(end_angle);
+    float min_distance = xyp_hypot(start_x - px, start_y - py);
+    float end_distance = xyp_hypot(end_x - px, end_y - py);
+    float center_dx = px - sg->cx;
+    float center_dy = py - sg->cy;
+    float center_distance = xyp_hypot(center_dx, center_dy);
+
+    if (end_distance < min_distance)
+    {
+        min_distance = end_distance;
+    }
+
+    if (center_distance < XYP_EPS)
+    {
+        return sg->radius;
+    }
+
+    if (xyp_angle_on_arc(sg, atan2f(center_dy, center_dx)))
+    {
+        float radial_distance = fabsf(center_distance - sg->radius);
+        if (radial_distance < min_distance)
+        {
+            min_distance = radial_distance;
+        }
+    }
+
+    return min_distance;
+}
+
+uint8_t XYPath_ValidateClearance(const xy_path_t *p,
+                                 float center_x, float center_y,
+                                 float min_distance,
+                                 float *actual_min_distance)
+{
+    float path_min = FLT_MAX;
+
+    if (p == 0 || p->seg_num == 0U || min_distance < 0.0f)
+    {
+        if (actual_min_distance != 0)
+        {
+            *actual_min_distance = 0.0f;
+        }
+        return 0U;
+    }
+
+    for (uint8_t i = 0U; i < p->seg_num; i++)
+    {
+        const xy_seg_t *sg = &p->seg[i];
+        float distance;
+
+        if (sg->type == XY_SEG_LINE)
+        {
+            distance = xyp_line_distance_to_point(sg, center_x, center_y);
+        }
+        else if (sg->type == XY_SEG_ARC && sg->radius > XYP_EPS)
+        {
+            distance = xyp_arc_distance_to_point(sg, center_x, center_y);
+        }
+        else
+        {
+            if (actual_min_distance != 0)
+            {
+                *actual_min_distance = 0.0f;
+            }
+            return 0U;
+        }
+
+        if (distance < path_min)
+        {
+            path_min = distance;
+        }
+    }
+
+    if (actual_min_distance != 0)
+    {
+        *actual_min_distance = path_min;
+    }
+
+    return (path_min + XYP_EPS >= min_distance) ? 1U : 0U;
 }
 
 /* 在弧长 s 处求位置 (x,y) 与单位切向 (tx,ty) */

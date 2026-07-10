@@ -76,9 +76,36 @@ typedef struct
     int32_t      target;    /* 当前最终目标(counts,dir 校正后坐标系) */
 } axis_t;
 
+typedef enum
+{
+    MOTOR_FAULT_NONE = 0,
+    MOTOR_FAULT_PATH_BUILD,
+    MOTOR_FAULT_PATH_CLEARANCE,
+    MOTOR_FAULT_RUNTIME_CLEARANCE,
+    MOTOR_FAULT_GANTRY_SYNC,
+} motor_fault_t;
+
+/* Keil Watch 诊断量。所有位置/距离均为 dir 校正后的 counts。 */
+typedef struct
+{
+    int32_t gantry_left_pos;
+    int32_t gantry_right_pos;
+    int32_t gantry_sync_error;
+    float   gantry_left_ref;
+    float   gantry_right_ref;
+    float   path_x_ref;
+    float   path_y_ref;
+    float   path_x_ff;
+    float   path_y_ff;
+    float   path_min_clearance;
+    float   actual_min_clearance;
+    motor_fault_t fault_code;
+} motor_diag_t;
+
 extern axis_cfg_t axis_cfg[AXIS_NUM];   /* 编译期配置表(定义在 .c) */
 extern axis_t     axis[AXIS_NUM];        /* 运行态 */
 extern moto_measure_t Motor[MOTOR_NUM];  /* CAN 回传的电机原始数据 */
+extern volatile motor_diag_t MotorDiag;  /* Keil Watch 运动/避障诊断 */
 
 /* ---- X 轴标定点(留作参考,来自原四点位测试;单位:输出轴 counts) ---- */
 #define X_CAL_POINT0   (-1636607)
@@ -117,7 +144,7 @@ extern moto_measure_t Motor[MOTOR_NUM];  /* CAN 回传的电机原始数据 */
  * ============================================================================ */
 void    Axis_InitAll(void);                          /* 按配置表初始化全部轴(traj + 两个 PID) */
 void    Axis_SetTarget(axis_id_t id, int32_t target);/* 设某轴最终目标,内部走 TrajTrack_SetTarget */
-void    Axis_SetTargetXGantry(int32_t x);            /* 同时给 GANTRY_L/R 同一 X 目标(同步) */
+void    Axis_SetTargetXGantry(int32_t x);            /* 同时给 GANTRY_L/R 同一 X 终点(各自轨迹) */
 int32_t Axis_GetPos(axis_id_t id);                   /* 读某轴实测位置(dir 校正,counts) */
 uint8_t Axis_IsBusy(axis_id_t id);                   /* 某轴是否正在跑轨迹 */
 /* 某轴是否"真正到位":轨迹已走完(!busy) 且 实测位置进了 ±tol_counts 容差。
@@ -187,11 +214,11 @@ void    CraneFlow_OnVisionError(void);
 uint8_t CraneFlow_IsVisionActive(void);
 
 /* ---- XY 联动路径上层封装(折线 + 拐角圆弧绕障,非阻塞) ----
- * CranePath_Run():构建并启动一条 counts 域航点路径(blend_radius=拐角圆弧半径)。
+ * CranePath_Run():构建并启动一条 counts 域航点路径;仅构建和净空校验都通过时返回 1。
  * CranePath_IsActive()/IsDone():路径模式状态 / 是否走完。
  * CranePath_Finish():收尾,退出路径模式并把 X/Y 各轴 traj 复位对齐到实测位置。
  * 启动后由 MotorSysTask 每周期自动 XYPath_Tick,X/Y 位置环 ref 自动取路径插值值。 */
-void    CranePath_Run(const map_pt_t *pts, uint8_t num, float blend_radius);
+uint8_t CranePath_Run(const map_pt_t *pts, uint8_t num, float blend_radius);
 uint8_t CranePath_IsActive(void);
 uint8_t CranePath_IsDone(void);
 void    CranePath_Finish(void);
