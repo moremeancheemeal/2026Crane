@@ -527,6 +527,7 @@ typedef enum
 
     VISION_SUB_RETURN_MOVE_HOME,
     VISION_SUB_RETURN_DOWN_BOTTOM,
+    VISION_SUB_RETURN_CLAW_CLOSE,
     VISION_SUB_DONE,
     VISION_SUB_ERROR,
 } vision_sub_t;
@@ -1010,9 +1011,14 @@ static void CraneFlow_VisionTick(void)
                 }
                 else
                 {
-                    /* 最后一件放完就地停住:不回原点、不降底,保持当前(抬顶)位置。 */
-                    vision_active = 0U;
-                    vision_sub = VISION_SUB_DONE;
+                    if (VisionFlow_StartXYPath(FLOW_X_HOME, 0))
+                    {
+                        vision_sub = VISION_SUB_RETURN_MOVE_HOME;
+                    }
+                    else
+                    {
+                        vision_sub = VISION_SUB_ERROR;
+                    }
                 }
             }
             break;
@@ -1027,6 +1033,14 @@ static void CraneFlow_VisionTick(void)
 
         case VISION_SUB_RETURN_DOWN_BOTTOM:
             if (Z_IsReached(FLOW_TOL_Z))
+            {
+                ClawClose();
+                vision_sub = VISION_SUB_RETURN_CLAW_CLOSE;
+            }
+            break;
+
+        case VISION_SUB_RETURN_CLAW_CLOSE:
+            if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
             {
                 vision_active = 0U;
                 vision_sub = VISION_SUB_DONE;
