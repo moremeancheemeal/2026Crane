@@ -45,8 +45,8 @@ typedef struct
 
 /* ---- 升降高度(counts,越负越高) ---- */
 #define Z_TOP_TRAVEL    (-300000)   /* 最高运输/扫描位置 */
-#define Z_LAYER_1       (-104422)   /* ① 点位探测/抓取高度 */
-#define Z_LAYER_2       (-193000)   /* ② 点位探测/抓取高度 */
+#define Z_LAYER_1       (-100000)   /* ① 点位探测/抓取高度 */
+#define Z_LAYER_2       (-50000)   /* ② 点位探测/抓取高度 */
 #define Z_LAYER_3       (-150000)   /* ③ 点位探测/抓取高度 */
 #define Z_PLACE         (-75000)    /* ④～⑧统一放货高度 */
 #define Z_BOTTOM        (0)

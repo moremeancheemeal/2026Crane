@@ -37,9 +37,9 @@ axis_cfg_t axis_cfg[AXIS_NUM] =
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
     /* AXIS_SLIDE_Y (0x203) 滑行,Y —— 直移与 XY 路径共用此组约束
-     * 提速保守档:V 100->180,A 200->400,J 1200->2500(绕障合速度也走这组) */
+     * 提速档:V 300,A 700,J 5000(绕障合速度也走这组;两轴均 M3508,合速度 300 距实用顶 400 留余量) */
     { 2, +1, MOTOR_REDUCTION_RATIO_3508,
-      180.0f, 400.0f, 2500.0f,
+      300.0f, 700.0f, 5000.0f,
       0.004f, 0.0f, 0.0f, 170u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
@@ -1008,14 +1008,9 @@ static void CraneFlow_VisionTick(void)
                 }
                 else
                 {
-                    if (VisionFlow_StartXYPath(FLOW_X_HOME, 0))
-                    {
-                        vision_sub = VISION_SUB_RETURN_MOVE_HOME;
-                    }
-                    else
-                    {
-                        vision_sub = VISION_SUB_ERROR;
-                    }
+                    /* 最后一件放完就地停住:不回原点、不降底,保持当前(抬顶)位置。 */
+                    vision_active = 0U;
+                    vision_sub = VISION_SUB_DONE;
                 }
             }
             break;
