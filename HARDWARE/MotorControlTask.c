@@ -36,16 +36,17 @@ axis_cfg_t axis_cfg[AXIS_NUM] =
       0.004f, 0.0f, 0.0f, 170u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
-    /* AXIS_SLIDE_Y (0x203) 滑行,Y —— 直移与 XY 路径共用此组约束 */
+    /* AXIS_SLIDE_Y (0x203) 滑行,Y —— 直移与 XY 路径共用此组约束
+     * 提速保守档:V 100->180,A 200->400,J 1200->2500(绕障合速度也走这组) */
     { 2, +1, MOTOR_REDUCTION_RATIO_3508,
-      100.0f, 200.0f, 1200.0f,
+      180.0f, 400.0f, 2500.0f,
       0.004f, 0.0f, 0.0f, 170u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
     /* AXIS_LIFT_Z (0x204) 升降,Z —— V 保持不变,A/J 比上一版提高一倍 */
     { 3, +1, MOTOR_REDUCTION_RATIO_3508,
       100.0f, 320.0f, 1600.0f,
-      0.004f, 0.0f, 0.0f, 100u, 10u,
+      0.004f, 0.0f, 0.0f, 350u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
     /* AXIS_YAW (0x205) 旋转,Yaw —— 慢稳 */
@@ -805,7 +806,6 @@ void CraneFlow_OnVisionStart(void)
 
     VisionFlow_Reset();
     vision_active = 1U;
-    ClawOpen();
     VisionFlow_StartSampleMove();
 }
 
@@ -843,9 +843,13 @@ static void CraneFlow_VisionTick(void)
     switch (vision_sub)
     {
         case VISION_SUB_SAMPLE_LIFT_TOP:
-            if (Z_IsReached(FLOW_TOL_Z) && Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
+            if (Z_IsReached(FLOW_TOL_Z))
             {
                 const box_t *pick = &vision_pick_table[vision_sample_order[vision_sample_index]].pick;
+                if (vision_sample_index == 0U)
+                {
+                    ClawOpen();
+                }
                 if (VisionFlow_StartXYPath(pick->x_counts, pick->y_counts))
                 {
                     vision_sub = VISION_SUB_SAMPLE_MOVE_XY;

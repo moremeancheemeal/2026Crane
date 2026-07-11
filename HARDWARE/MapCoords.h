@@ -45,20 +45,20 @@ typedef struct
 
 /* ---- 升降高度(counts,越负越高) ---- */
 #define Z_TOP_TRAVEL    (-300000)   /* 最高运输/扫描位置 */
-#define Z_LAYER_1       (-100000)   /* ① 点位探测/抓取高度 */
-#define Z_LAYER_2       (-140000)   /* ② 点位探测/抓取高度 */
-#define Z_LAYER_3       (-183000)   /* ③ 点位探测/抓取高度 */
+#define Z_LAYER_1       (-104422)   /* ① 点位探测/抓取高度 */
+#define Z_LAYER_2       (-193000)   /* ② 点位探测/抓取高度 */
+#define Z_LAYER_3       (-150000)   /* ③ 点位探测/抓取高度 */
 #define Z_PLACE         (-75000)    /* ④～⑧统一放货高度 */
 #define Z_BOTTOM        (0)
 
 #define POSE_YAW_ZERO   (0)
 
 /* ---- 取货区实测点位:扫描使用相同 XY + Z_TOP_TRAVEL,抓取时下降到各自 Z ---- */
-#define PICK_1_Y_COUNTS    ( 511698)
+#define PICK_1_Y_COUNTS    ( 528305)
 #define PICK_2_Y_COUNTS    (-524778)
-#define PICK_3_Y_COUNTS    (   5851)
-#define BOX_PICK_1   { -2176922, PICK_1_Y_COUNTS, Z_LAYER_1, POSE_YAW_ZERO }  /* ① 白芸豆 */
-#define BOX_PICK_2   { -2176920, PICK_2_Y_COUNTS, Z_LAYER_2, POSE_YAW_ZERO }  /* ② 绿豆   */
+#define PICK_3_Y_COUNTS    (   12843)
+#define BOX_PICK_1   { -2160287, PICK_1_Y_COUNTS, Z_LAYER_1, POSE_YAW_ZERO }  /* ① 白芸豆 */
+#define BOX_PICK_2   { -2160287, PICK_2_Y_COUNTS, Z_LAYER_2, POSE_YAW_ZERO }  /* ② 绿豆   */
 #define BOX_PICK_3   { -1893572, PICK_3_Y_COUNTS, Z_LAYER_3, POSE_YAW_ZERO }  /* ③ 黄豆   */
 
 /* ---- 放置区实测点位 ---- */
@@ -67,11 +67,11 @@ typedef struct
 #define PLACE_6_Y_COUNTS   (   9348)
 #define PLACE_7_Y_COUNTS   (-420153)
 #define PLACE_8_Y_COUNTS   (-916231)
-#define BOX_PLACE_4  { 1509918, PLACE_4_Y_COUNTS, Z_PLACE,  96336 }
-#define BOX_PLACE_5  { 1753683, PLACE_5_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
-#define BOX_PLACE_6  { 1753682, PLACE_6_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
-#define BOX_PLACE_7  { 1753684, PLACE_7_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
-#define BOX_PLACE_8  { 1509917, PLACE_8_Y_COUNTS, Z_PLACE, 100915 }
+#define BOX_PLACE_4  { 1519525, PLACE_4_Y_COUNTS, Z_PLACE,  96336 }
+#define BOX_PLACE_5  { 1745095, PLACE_5_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
+#define BOX_PLACE_6  { 1745095, PLACE_6_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
+#define BOX_PLACE_7  { 1745095, PLACE_7_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
+#define BOX_PLACE_8  { 1519525, PLACE_8_Y_COUNTS, Z_PLACE, 100915 }
 
 /* 规则图 S 形路径:
  *   左柱走负 Y,右柱走正 Y。两个 X 值均为圆柱中心,Y 均为场地中线 0。

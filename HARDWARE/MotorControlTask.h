@@ -114,7 +114,7 @@ extern volatile motor_diag_t MotorDiag;  /* Keil Watch 运动/避障诊断 */
 #define X_CAL_POINT3   (1860000)
 
 /* ---- 夹爪旋转电机两个固定位置(实测标定 counts) ---- */
-#define CLAW_OPEN_ANGLE     100000
+#define CLAW_OPEN_ANGLE     87812
 #define CLAW_CLOSED_ANGLE   0
 
 /* ---- 旋转电机(YAW)两个固定位置 ---- */
