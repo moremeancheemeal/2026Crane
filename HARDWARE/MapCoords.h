@@ -96,8 +96,9 @@ typedef struct
 #define DETOUR_BEAN_Y_COUNTS             (-420153)
 #define DETOUR_BOX_Y_COUNTS              (427058)
 
-/* 150mm 拐角圆弧。 */
-#define PATH_CORNER_BLEND_COUNTS         158394.0f
+/* 200mm 拐角圆弧(原 150mm)。弧越长,过桩门点处路径方向转得越缓,
+ * X/Y 分量速度切换越平顺,缓解过桩时龙门窜/小车顿。 */
+#define PATH_CORNER_BLEND_COUNTS         211192.0f
 
 /* 用户可编辑的默认任务表。视觉模式下实际 place 由 MATCH 数据覆盖。 */
 #define MISSION_TABLE  { \
