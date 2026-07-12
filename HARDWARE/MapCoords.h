@@ -53,20 +53,23 @@ typedef struct
 
 #define POSE_YAW_ZERO   (0)
 
+/* Y 上电零位整体校正:⑥号位实测 -12879,原标定 9348,差值为 -22227。 */
+#define MAP_Y_OFFSET_COUNTS  (-22227)
+
 /* ---- 取货区实测点位:扫描使用相同 XY + Z_TOP_TRAVEL,抓取时下降到各自 Z ---- */
-#define PICK_1_Y_COUNTS    ( 528305)
-#define PICK_2_Y_COUNTS    (-524778)
-#define PICK_3_Y_COUNTS    (   12843)
+#define PICK_1_Y_COUNTS    ( 528305 + MAP_Y_OFFSET_COUNTS)
+#define PICK_2_Y_COUNTS    (-524778 + MAP_Y_OFFSET_COUNTS)
+#define PICK_3_Y_COUNTS    (  12843 + MAP_Y_OFFSET_COUNTS)
 #define BOX_PICK_1   { -2160287, PICK_1_Y_COUNTS, Z_LAYER_1, POSE_YAW_ZERO }  /* ① 白芸豆 */
 #define BOX_PICK_2   { -2160287, PICK_2_Y_COUNTS, Z_LAYER_2, POSE_YAW_ZERO }  /* ② 绿豆   */
 #define BOX_PICK_3   { -1893572, PICK_3_Y_COUNTS, Z_LAYER_3, POSE_YAW_ZERO }  /* ③ 黄豆   */
 
 /* ---- 放置区实测点位 ---- */
-#define PLACE_4_Y_COUNTS   ( 902867)
-#define PLACE_5_Y_COUNTS   ( 427058)
-#define PLACE_6_Y_COUNTS   (   9348)
-#define PLACE_7_Y_COUNTS   (-420153)
-#define PLACE_8_Y_COUNTS   (-916231)
+#define PLACE_4_Y_COUNTS   ( 902867 + MAP_Y_OFFSET_COUNTS)
+#define PLACE_5_Y_COUNTS   ( 427058 + MAP_Y_OFFSET_COUNTS)
+#define PLACE_6_Y_COUNTS   (   9348 + MAP_Y_OFFSET_COUNTS)
+#define PLACE_7_Y_COUNTS   (-420153 + MAP_Y_OFFSET_COUNTS)
+#define PLACE_8_Y_COUNTS   (-916231 + MAP_Y_OFFSET_COUNTS)
 #define BOX_PLACE_4  { 1519525, PLACE_4_Y_COUNTS, Z_PLACE,  96336 }
 #define BOX_PLACE_5  { 1745095, PLACE_5_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
 #define BOX_PLACE_6  { 1745095, PLACE_6_Y_COUNTS, Z_PLACE,  POSE_YAW_ZERO }
@@ -79,9 +82,9 @@ typedef struct
 #define MAP_COUNTS_PER_MM               1055.96f
 
 #define OBSTACLE_BEAN_X_COUNTS          (-1251279)
-#define OBSTACLE_BEAN_Y_COUNTS          (0)
+#define OBSTACLE_BEAN_Y_COUNTS          (MAP_Y_OFFSET_COUNTS)
 #define OBSTACLE_BOX_X_COUNTS           (828350)
-#define OBSTACLE_BOX_Y_COUNTS           (0)
+#define OBSTACLE_BOX_Y_COUNTS           (MAP_Y_OFFSET_COUNTS)
 
 /* 夹具/货物安全包络:
  * 51mm 圆柱半径 + 200mm 货物半径 + 50mm 静态余量 + 50mm 制动余量 = 351mm。 */
@@ -93,8 +96,8 @@ typedef struct
 
 /* 每根圆柱使用前后两个门点。门点 X 距圆心 300mm,Y 沿用已验证的⑦/⑤位置。 */
 #define OBSTACLE_GATE_HALF_X_COUNTS      316788
-#define DETOUR_BEAN_Y_COUNTS             (-420153)
-#define DETOUR_BOX_Y_COUNTS              (427058)
+#define DETOUR_BEAN_Y_COUNTS             PLACE_7_Y_COUNTS
+#define DETOUR_BOX_Y_COUNTS              PLACE_5_Y_COUNTS
 
 /* 200mm 拐角圆弧(原 150mm)。弧越长,过桩门点处路径方向转得越缓,
  * X/Y 分量速度切换越平顺,缓解过桩时龙门窜/小车顿。 */
