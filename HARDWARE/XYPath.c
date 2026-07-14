@@ -5,8 +5,6 @@
 
 /* 数值保护 */
 #define XYP_EPS   1e-4f
-#define XYP_PI    3.14159265358979323846f
-#define XYP_2PI   (2.0f * XYP_PI)
 
 /* ============================================================================
  * 内部:几何构建
@@ -25,6 +23,25 @@
 static float xyp_hypot(float dx, float dy)
 {
     return sqrtf(dx * dx + dy * dy);
+}
+
+/* 逐段进给率:按当前段方向把合速度上限放大到 base_vmax/max(|ux|,|uy|),
+ * 使占主导的轴吃满 base_vmax。max(|ux|,|uy|)∈[1/√2,1],给下限兜底防除零。 */
+static float xyp_seg_vmax(const xy_path_t *p, const xy_seg_t *sg)
+{
+#if XY_PATH_PER_SEG_FEEDRATE
+    float ax = fabsf(sg->ux);
+    float ay = fabsf(sg->uy);
+    float w  = (ax > ay) ? ax : ay;
+    if (w < 0.5f)
+    {
+        w = 0.5f;
+    }
+    return p->base_vmax / w;
+#else
+    (void)sg;
+    return p->base_vmax;
+#endif
 }
 
 /* 追加一条直线段(从 (x0,y0) 到 (x1,y1)),返回新的累计弧长 */
@@ -51,49 +68,32 @@ static float xyp_push_line(xy_path_t *p, float s_acc,
     return s_acc + len;
 }
 
-/* 追加一段圆弧(圆心 c,半径 R,起始角 a0,旋向 adir,圆心角 dang>=0) */
-static float xyp_push_arc(xy_path_t *p, float s_acc,
-                          float cx, float cy, float R,
-                          float a0, float adir, float dang)
-{
-    float len = R * dang;
-
-    if (len < XYP_EPS || p->seg_num >= XY_PATH_MAX_SEGMENTS)
-    {
-        return s_acc;
-    }
-
-    xy_seg_t *sg = &p->seg[p->seg_num++];
-    sg->type    = XY_SEG_ARC;
-    sg->s_start = s_acc;
-    sg->length  = len;
-    sg->cx = cx;  sg->cy = cy;
-    sg->radius  = R;
-    sg->ang0    = a0;
-    sg->ang_dir = (adir >= 0.0f) ? 1.0f : -1.0f;
-
-    return s_acc + len;
-}
-
 void XYPath_Init(xy_path_t *p, float v_max, float a_max, float j_max, float period)
 {
-    /* 弧长 S 曲线:把"沿路径合速度"当作 1 维位置去规划。
-     * v/a/j 单位 = counts(沿路径)/s, /s^2, /s^3。
-     * ⚠ 取值需保守:合速度会按切向分解到 X、Y,任一轴分量不得超该轴上限。
-     *   简单保守做法:v_max <= min(各轴 vmax 的 counts/s)。联调时再调。 */
+    /* 逐段 S 曲线:把"当前段长度"当作 1 维位置去规划(每段 rest-to-rest)。
+     * v/a/j 单位 = counts(沿段)/s, /s^2, /s^3。
+     *   v_max = 单轴上限(base_vmax);逐段进给率会按段方向把该段合速度上限
+     *   放大到 base_vmax/max(|ux|,|uy|),使主导轴吃满 base_vmax。
+     *   a/j 保持为基准(不放大),即主导轴加速度 <= a_max,偏保守以抑制震动。 */
     TrajTrack_Init(&p->traj, v_max, a_max, j_max, period, 0.0f);
 
+    p->base_vmax = v_max;
     p->seg_num   = 0;
+    p->seg_idx   = 0;
     p->total_len = 0.0f;
     p->x_ref = p->y_ref = 0.0f;
     p->x_ff  = p->y_ff  = 0.0f;
     p->s = p->s_dot = 0.0f;
+    p->dwell_cnt = 0U;
     p->active = 0U;
 }
 
 uint8_t XYPath_Build(xy_path_t *p, const map_pt_t *pts, uint8_t num, float blend_radius)
 {
+    (void)blend_radius;             /* 纯折线 + 逐段全停:不做拐角圆弧混合 */
+
     p->seg_num   = 0;
+    p->seg_idx   = 0;
     p->total_len = 0.0f;
     p->active    = 0U;
 
@@ -106,131 +106,18 @@ uint8_t XYPath_Build(xy_path_t *p, const map_pt_t *pts, uint8_t num, float blend
         return 0U;
     }
 
+    /* 航点直线相连:相邻两点铺一段直线。退化段(重合点)自动跳过。 */
     float s_acc = 0.0f;
-
-    /* cur = 当前已铺到的"线段实际起点"。首段从 pts[0] 出发;遇到拐角时,
-     * 直线只铺到入切点 T_in,然后铺圆弧到出切点 T_out,cur 更新为 T_out。 */
-    float cur_x = (float)pts[0].x;
-    float cur_y = (float)pts[0].y;
-
-    for (uint8_t i = 1; i + 1 < num; i++)
+    for (uint8_t i = 1; i < num; i++)
     {
-        float px = (float)pts[i].x,     py = (float)pts[i].y;       /* 拐角顶点 */
-        float ax = (float)pts[i - 1].x, ay = (float)pts[i - 1].y;   /* 前一点 */
-        float bx = (float)pts[i + 1].x, by = (float)pts[i + 1].y;   /* 后一点 */
-
-        /* 入/出单位向量 */
-        float inx = px - ax, iny = py - ay;
-        float outx = bx - px, outy = by - py;
-        float in_len  = xyp_hypot(inx, iny);
-        float out_len = xyp_hypot(outx, outy);
-
-        if (blend_radius < XYP_EPS || in_len < XYP_EPS || out_len < XYP_EPS)
-        {
-            /* 不混合:直接铺到拐角顶点(纯折线,拐角处速度方向突变) */
-            s_acc = xyp_push_line(p, s_acc, cur_x, cur_y, px, py);
-            cur_x = px;  cur_y = py;
-            continue;
-        }
-
-        float uinx = inx / in_len,  uiny = iny / in_len;
-        float uoutx = outx / out_len, uouty = outy / out_len;
-
-        /* 拐角夹角:cos(2*phi) = u_in . u_out,phi = 半张角的余角处理 */
-        float dot = uinx * uoutx + uiny * uouty;
-        if (dot >  1.0f) dot =  1.0f;
-        if (dot < -1.0f) dot = -1.0f;
-
-        /* 转折角 turn = 进入与离开方向夹角;phi = (pi - turn)/2 用于退让公式。
-         * 用 tan(phi) = sin/.. 的稳定写法:half = turn/2,d = R / tan((pi-turn)/2)
-         *                                              = R * tan(turn/2)。 */
-        float turn = acosf(dot);                 /* 0..pi */
-        if (turn < XYP_EPS)
-        {
-            /* 几乎共线,无需圆弧 */
-            s_acc = xyp_push_line(p, s_acc, cur_x, cur_y, px, py);
-            cur_x = px;  cur_y = py;
-            continue;
-        }
-
-        float R = blend_radius;
-        float d = R * tanf(turn * 0.5f);         /* 拐角两侧退让距离 */
-
-        /* 退让受相邻段长限制(从 cur 到 P 的剩余长 与 P 到 B 的长) */
-        float avail_in  = xyp_hypot(px - cur_x, py - cur_y);
-        float avail_out = out_len;
-        float dmax = (avail_in < avail_out ? avail_in : avail_out) * 0.5f;
-        if (d > dmax + XYP_EPS)
-        {
-            /* 安全模式不允许偷偷缩小圆角半径,否则转弯加速度和柱距都会失真。 */
-            p->seg_num = 0U;
-            p->total_len = 0.0f;
-            return 0U;
-        }
-
-        /* 切点 */
-        float tin_x = px - d * uinx,  tin_y = py - d * uiny;     /* 入切点 */
-        float tout_x = px + d * uoutx, tout_y = py + d * uouty;  /* 出切点 */
-
-        /* 1) 直线:cur -> 入切点 */
-        s_acc = xyp_push_line(p, s_acc, cur_x, cur_y, tin_x, tin_y);
-
-        /* 2) 圆弧:入切点 -> 出切点
-         * 圆心在角平分线上,距切点 R(垂直于切向)。用入切点法向求圆心:
-         * 旋向由叉积 (u_in x u_out) 决定。 */
-        float cross = uinx * uouty - uiny * uoutx;   /* >0 左转(逆时针) */
-        float ndir  = (cross >= 0.0f) ? 1.0f : -1.0f;
-
-        /* 入切点处指向圆心的单位法向 = 旋转 u_in 90 度(按旋向) */
-        float nx = -uiny * ndir;
-        float ny =  uinx * ndir;
-        float cx = tin_x + R * nx;
-        float cy = tin_y + R * ny;
-
-        /* 起始角 = 圆心->入切点 的方位角;圆心角 = turn(切向转过的角度) */
-        float a0 = atan2f(tin_y - cy, tin_x - cx);
-        s_acc = xyp_push_arc(p, s_acc, cx, cy, R, a0, ndir, turn);
-
-        /* cur 更新到出切点,下一段直线从这里继续 */
-        cur_x = tout_x;  cur_y = tout_y;
+        s_acc = xyp_push_line(p, s_acc,
+                              (float)pts[i - 1].x, (float)pts[i - 1].y,
+                              (float)pts[i].x,     (float)pts[i].y);
     }
-
-    /* 末段:cur -> 最后一个航点 */
-    s_acc = xyp_push_line(p, s_acc, cur_x, cur_y,
-                          (float)pts[num - 1].x, (float)pts[num - 1].y);
 
     p->total_len = s_acc;
+
     return (p->seg_num > 0U && p->total_len > XYP_EPS) ? 1U : 0U;
-}
-
-static float xyp_normalize_angle(float angle)
-{
-    while (angle < 0.0f)
-    {
-        angle += XYP_2PI;
-    }
-    while (angle >= XYP_2PI)
-    {
-        angle -= XYP_2PI;
-    }
-    return angle;
-}
-
-static uint8_t xyp_angle_on_arc(const xy_seg_t *sg, float angle)
-{
-    float sweep = sg->length / sg->radius;
-    float delta;
-
-    if (sg->ang_dir >= 0.0f)
-    {
-        delta = xyp_normalize_angle(angle - sg->ang0);
-    }
-    else
-    {
-        delta = xyp_normalize_angle(sg->ang0 - angle);
-    }
-
-    return (delta <= sweep + XYP_EPS) ? 1U : 0U;
 }
 
 static float xyp_line_distance_to_point(const xy_seg_t *sg, float px, float py)
@@ -252,42 +139,6 @@ static float xyp_line_distance_to_point(const xy_seg_t *sg, float px, float py)
                      sg->y0 + sg->uy * along - py);
 }
 
-static float xyp_arc_distance_to_point(const xy_seg_t *sg, float px, float py)
-{
-    float sweep = sg->length / sg->radius;
-    float end_angle = sg->ang0 + sg->ang_dir * sweep;
-    float start_x = sg->cx + sg->radius * cosf(sg->ang0);
-    float start_y = sg->cy + sg->radius * sinf(sg->ang0);
-    float end_x = sg->cx + sg->radius * cosf(end_angle);
-    float end_y = sg->cy + sg->radius * sinf(end_angle);
-    float min_distance = xyp_hypot(start_x - px, start_y - py);
-    float end_distance = xyp_hypot(end_x - px, end_y - py);
-    float center_dx = px - sg->cx;
-    float center_dy = py - sg->cy;
-    float center_distance = xyp_hypot(center_dx, center_dy);
-
-    if (end_distance < min_distance)
-    {
-        min_distance = end_distance;
-    }
-
-    if (center_distance < XYP_EPS)
-    {
-        return sg->radius;
-    }
-
-    if (xyp_angle_on_arc(sg, atan2f(center_dy, center_dx)))
-    {
-        float radial_distance = fabsf(center_distance - sg->radius);
-        if (radial_distance < min_distance)
-        {
-            min_distance = radial_distance;
-        }
-    }
-
-    return min_distance;
-}
-
 uint8_t XYPath_ValidateClearance(const xy_path_t *p,
                                  float center_x, float center_y,
                                  float min_distance,
@@ -307,24 +158,7 @@ uint8_t XYPath_ValidateClearance(const xy_path_t *p,
     for (uint8_t i = 0U; i < p->seg_num; i++)
     {
         const xy_seg_t *sg = &p->seg[i];
-        float distance;
-
-        if (sg->type == XY_SEG_LINE)
-        {
-            distance = xyp_line_distance_to_point(sg, center_x, center_y);
-        }
-        else if (sg->type == XY_SEG_ARC && sg->radius > XYP_EPS)
-        {
-            distance = xyp_arc_distance_to_point(sg, center_x, center_y);
-        }
-        else
-        {
-            if (actual_min_distance != 0)
-            {
-                *actual_min_distance = 0.0f;
-            }
-            return 0U;
-        }
+        float distance = xyp_line_distance_to_point(sg, center_x, center_y);
 
         if (distance < path_min)
         {
@@ -340,65 +174,48 @@ uint8_t XYPath_ValidateClearance(const xy_path_t *p,
     return (path_min + XYP_EPS >= min_distance) ? 1U : 0U;
 }
 
-/* 在弧长 s 处求位置 (x,y) 与单位切向 (tx,ty) */
-static void XYPath_Eval(const xy_path_t *p, float s,
-                        float *x, float *y, float *tx, float *ty)
+/* 把当前段 seg_idx 交给 TrajTrack 规划:0 -> 段长 的 rest-to-rest S 曲线。
+ * 段内进给率上限按段方向缩放(主导轴吃满 base_vmax);a/j 用基准不放大。 */
+static void XYPath_PlanCurrentSeg(xy_path_t *p)
 {
-    /* 夹紧到 [0, total_len] */
-    if (s < 0.0f) s = 0.0f;
-    if (s > p->total_len) s = p->total_len;
+    const xy_seg_t *sg = &p->seg[p->seg_idx];
 
-    /* 找 s 所在段:最大的 i 满足 seg[i].s_start <= s */
-    uint8_t idx = 0;
-    for (uint8_t i = 0; i < p->seg_num; i++)
-    {
-        if (p->seg[i].s_start <= s)
-        {
-            idx = i;
-        }
-    }
+    p->traj.v_max = xyp_seg_vmax(p, sg);
+    TrajTrack_Reset(&p->traj, 0.0f);
+    TrajTrack_SetTarget(&p->traj, sg->length);
+}
 
-    const xy_seg_t *sg = &p->seg[idx];
-    float ds = s - sg->s_start;
-    if (ds < 0.0f) ds = 0.0f;
-    if (ds > sg->length) ds = sg->length;
+/* 用当前段进度 sp(0..段长)算平面位置与速度前馈,写入本刻输出。 */
+static void XYPath_EmitFromSeg(xy_path_t *p, float sp, float sp_dot)
+{
+    const xy_seg_t *sg = &p->seg[p->seg_idx];
 
-    if (sg->type == XY_SEG_LINE)
-    {
-        *x = sg->x0 + sg->ux * ds;
-        *y = sg->y0 + sg->uy * ds;
-        *tx = sg->ux;
-        *ty = sg->uy;
-    }
-    else    /* XY_SEG_ARC */
-    {
-        float ang = sg->ang0 + sg->ang_dir * (ds / sg->radius);
-        *x = sg->cx + sg->radius * cosf(ang);
-        *y = sg->cy + sg->radius * sinf(ang);
-        /* 切向 = d/ds 位置:对圆弧 = 旋转半径方向 90 度,符号随旋向 */
-        *tx = -sinf(ang) * sg->ang_dir;
-        *ty =  cosf(ang) * sg->ang_dir;
-    }
+    if (sp < 0.0f) sp = 0.0f;
+    if (sp > sg->length) sp = sg->length;
+
+    p->x_ref = sg->x0 + sg->ux * sp;
+    p->y_ref = sg->y0 + sg->uy * sp;
+    p->x_ff  = sg->ux * sp_dot;
+    p->y_ff  = sg->uy * sp_dot;
+
+    p->s     = sg->s_start + sp;         /* 全局进度,仅供监视 */
+    p->s_dot = sp_dot;
 }
 
 void XYPath_Start(xy_path_t *p, float start_x, float start_y)
 {
     (void)start_x;
     (void)start_y;
-    /* 弧长从 0 起,规划到 total_len。起点位置由路径首段几何决定;
-     * start_x/y 预留用于将来"实测起点对齐/补偿",当前几何起点即 pts[0]。 */
-    TrajTrack_Reset(&p->traj, 0.0f);
-    TrajTrack_SetTarget(&p->traj, p->total_len);
+    /* 从第 0 段起,逐段 rest-to-rest。起点几何即 pts[0]。
+     * start_x/y 预留用于将来"实测起点对齐/补偿"。 */
+    p->seg_idx   = 0;
+    p->dwell_cnt = 0U;
+    p->active    = 1U;
 
-    p->s = 0.0f;
-    p->s_dot = 0.0f;
-    p->active = 1U;
+    XYPath_PlanCurrentSeg(p);
 
-    /* 预填首刻输出,避免 active 后首周期 ref 为 0 跳变 */
-    float tx, ty;
-    XYPath_Eval(p, 0.0f, &p->x_ref, &p->y_ref, &tx, &ty);
-    p->x_ff = 0.0f;
-    p->y_ff = 0.0f;
+    /* 预填首刻输出(段起点、零速),避免 active 后首周期 ref 跳变 */
+    XYPath_EmitFromSeg(p, 0.0f, 0.0f);
 }
 
 void XYPath_Tick(xy_path_t *p)
@@ -408,22 +225,42 @@ void XYPath_Tick(xy_path_t *p)
         return;
     }
 
-    /* 推进弧长 S 曲线 */
-    p->s     = TrajTrack_Calc(&p->traj);
-    p->s_dot = p->traj.vel;                 /* 沿路径速率 counts/s */
+    /* 航点驻留:段末速度已归零,钉住在【当前段起点】(=刚到达的航点)若干拍,
+     * 让龙门余振沉降。注意此处 seg_idx 已指向新段,故停在 sp=0(新段起点),
+     * 而非 seg.length(那是下一个航点,会造成位置跳变 -> 顿挫)。 */
+    if (p->dwell_cnt > 0U)
+    {
+        p->dwell_cnt--;
+        XYPath_EmitFromSeg(p, 0.0f, 0.0f);
+        return;
+    }
 
-    float tx, ty;
-    XYPath_Eval(p, p->s, &p->x_ref, &p->y_ref, &tx, &ty);
+    /* 推进当前段的 rest-to-rest S 曲线 */
+    float sp     = TrajTrack_Calc(&p->traj);
+    float sp_dot = p->traj.vel;
+    XYPath_EmitFromSeg(p, sp, sp_dot);
 
-    /* 速度前馈 = 单位切向 * 沿路径速率,分解到 X/Y */
-    p->x_ff = tx * p->s_dot;
-    p->y_ff = ty * p->s_dot;
+    /* 当前段走完(轨迹不忙,已到段末零速):切下一段,期间进入驻留 */
+    if (!TrajTrack_IsBusy(&p->traj))
+    {
+        if (p->seg_idx + 1U < p->seg_num)
+        {
+            p->seg_idx++;
+            XYPath_PlanCurrentSeg(p);
+            p->dwell_cnt = XY_PATH_WAYPOINT_DWELL_TICKS;   /* 到达中间航点,停一下 */
+            XYPath_EmitFromSeg(p, 0.0f, 0.0f);
+        }
+        /* 末段走完则保持在终点;XYPath_IsDone 会报完成 */
+    }
 }
 
 uint8_t XYPath_IsDone(const xy_path_t *p)
 {
-    /* 弧长 S 曲线跑完(traj 不忙)即几何路径走完 */
-    return (p->active && !TrajTrack_IsBusy(&p->traj)) ? 1U : 0U;
+    /* 最后一段跑完(traj 不忙)且不在驻留中,即整条路径走完 */
+    return (p->active &&
+            (p->seg_idx + 1U >= p->seg_num) &&
+            p->dwell_cnt == 0U &&
+            !TrajTrack_IsBusy(&p->traj)) ? 1U : 0U;
 }
 
 uint8_t XYPath_IsActive(const xy_path_t *p)

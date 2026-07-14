@@ -6,24 +6,25 @@
 #include "MapCoords.h"
 
 /* ============================================================================
- * XY 联动路径插值器(折线 + 拐角圆弧混合)
+ * XY 联动路径插值器(纯折线 + 逐段 rest-to-rest 全停)
  * ----------------------------------------------------------------------------
  * 目的:比赛不能越障,X(龙门)与 Y(小车)必须在水平面内沿一条【确定的几何
  *       路径】协同运动,而不是各走各的 S 曲线导致末端轨迹形状不可控。
  *
- * 架构:路径 / 速度分离
- *   1) 几何路径 p(s) = (x(s), y(s)),s = 沿路径弧长,0 .. total_len。
- *      由若干航点(map_pt_t)定义,拐角用圆弧混合保证切向连续(全程不停顿)。
- *   2) 弧长上的速度规划:复用现有 TrajTrack(7 段 jerk 受限 S 曲线),对标量
- *      s 做 0 -> total_len 的规划 —— 这就是你们已验证的"S 型加减速算法",
- *      只是被作用对象从单电机位置换成了"路径进度 s"。
- *   3) 每控制周期 XYPath_Tick():
- *        s   = traj.out         (本刻路径进度)
- *        sdot= traj.vel         (本刻沿路径速率)
- *        (x,y)         = 路径在 s 处插值
- *        (dx/ds,dy/ds) = 路径在 s 处单位切向
- *        x_ref = x, y_ref = y                         -> 喂 X/Y 位置环
- *        x_ff  = (dx/ds)*sdot, y_ff = (dy/ds)*sdot    -> 喂 X/Y 速度前馈
+ * ⚠ 大惯量龙门实测:只要过桩换向时结构还在动,整机就晃。拐角圆弧磨光滑
+ *   (切向连续)不足以消震 —— 必须在每个航点真正停到零速。故本模块采用:
+ *
+ * 架构:纯折线 + 逐段独立 S 曲线,航点处 rest-to-rest 全停
+ *   1) 几何路径 = 航点直线相连(无圆弧)。第 i 段方向固定为单位向量 (ux,uy)。
+ *   2) 逐段速度规划:对【当前段】复用 TrajTrack(7 段 jerk 受限 S 曲线),
+ *      把该段长度当 1 维位置做 0 -> length 的 rest-to-rest 规划。段末 v=0、
+ *      a=0;下一段又从 v=0、a=0 起。段内方向恒定 => X/Y 只是被同一标量曲线
+ *      按 (ux,uy) 固定分解,全程无速度/加速度不连续 => 不顿。
+ *   3) 每控制周期 XYPath_Tick():推进当前段的标量 S 曲线;走完则切到下一段
+ *      重新规划(自然经过零速)。位置/前馈按当前段方向分解:
+ *        sp    = traj.out                         (当前段内进度 0..length)
+ *        x_ref = seg.x0 + seg.ux*sp,  y_ref 同理  -> 喂 X/Y 位置环
+ *        x_ff  = seg.ux*traj.vel,     y_ff 同理    -> 喂 X/Y 速度前馈
  *
  * 单位:全部用 counts 域(与 TrajTrack / 轴目标一致)。航点由 MapCoords.h
  *       的 map_pt_t 给出,取放与绕障点均使用实测目标值。
@@ -35,6 +36,21 @@
 
 #define XY_PATH_MAX_WAYPOINTS   8       /* 单条路径最多航点数(够 S 绕障用) */
 #define XY_PATH_MAX_SEGMENTS    (2 * XY_PATH_MAX_WAYPOINTS)  /* 直线段+圆弧段上界 */
+
+/* 逐段进给率缩放开关:
+ *   1 = 每段按方向把合速度上限放大到 base_vmax/max(|ux|,|uy|),使【占主导的轴】
+ *       在任意段方向都吃满单轴上限(base_vmax)。纯 X/纯 Y 段吃满 100%,斜段
+ *       主导轴仍 100%、另一轴按比例更低。因逐段停车,段内方向恒定,放大不引入
+ *       任何不连续;任一轴分量恒 <= base_vmax,安全。
+ *   0 = 固定合速度上限 base_vmax(斜段主导轴吃不满,只有轴向段吃满)。
+ * 上板对比:先用 1(X/Y 都能顶到 350),想更保守再试 0。 */
+#define XY_PATH_PER_SEG_FEEDRATE      1
+
+/* 航点驻留:到达每个中间航点、速度归零后,额外保持 N 个控制周期(位置钉住、
+ * 前馈为 0)再规划下一段,给大惯量龙门时间把余振沉降掉。0 = 不驻留(仍会
+ * 因 rest-to-rest 在航点瞬时经过零速)。控制周期 2ms,故 25 拍 ≈ 50ms。
+ * 每趟只在少数中间航点各停一次,总耗时增加有限。 */
+#define XY_PATH_WAYPOINT_DWELL_TICKS  25U
 
 /* 段类型:直线 / 圆弧(拐角混合) */
 typedef enum
@@ -64,18 +80,26 @@ typedef struct
 /* 路径插值器状态 */
 typedef struct
 {
-    /* ---- 几何:折线 + 拐角圆弧拼成的段序列 ---- */
+    /* ---- 几何:纯折线段序列(无圆弧) ---- */
     xy_seg_t  seg[XY_PATH_MAX_SEGMENTS];
     uint8_t   seg_num;
-    float      total_len;       /* 路径总弧长 */
+    float      total_len;       /* 路径总弧长(所有段长之和,仅供监视) */
 
-    /* ---- 弧长上的 S 曲线(复用 TrajTrack) ---- */
-    traj_track_t  traj;          /* 规划 s: 0 -> total_len */
+    /* ---- 逐段 S 曲线(复用 TrajTrack) ----
+     * 每段独立规划 0 -> seg.length 的 rest-to-rest 曲线;走完切下一段。 */
+    traj_track_t  traj;          /* 规划【当前段】段内进度: 0 -> seg[seg_idx].length */
+    uint8_t   seg_idx;           /* 当前正在走的段下标 */
+
+    /* ---- 速度约束基准(counts 域,单轴上限)。逐段进给率缩放用。 ---- */
+    float   base_vmax;           /* 沿段合速度基准上限 = 单轴 vmax(counts/s) */
+
+    /* ---- 航点驻留计数:段末速度归零后钉住位置若干拍再进下一段 ---- */
+    uint16_t dwell_cnt;          /* 剩余驻留拍数;0 = 非驻留态 */
 
     /* ---- 本刻输出(counts 域) ---- */
     float   x_ref, y_ref;        /* 平面位置参考 -> X/Y 位置环 ref */
     float   x_ff,  y_ff;         /* 平面速度前馈 -> X/Y 速度环前馈(counts/s) */
-    float   s, s_dot;            /* 本刻路径进度 / 速率,便于监视 */
+    float   s, s_dot;            /* 本刻全局进度 / 沿段速率,便于监视 */
 
     uint8_t active;              /* 1 = 路径模式生效(X/Y ref 取本模块) */
 } xy_path_t;

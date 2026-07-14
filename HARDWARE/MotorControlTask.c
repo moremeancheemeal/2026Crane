@@ -45,9 +45,9 @@ axis_cfg_t axis_cfg[AXIS_NUM] =
       0.004f, 0.0f, 0.0f, 170u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
-    /* AXIS_LIFT_Z (0x204) 升降,Z —— V 保持不变,A/J 比上一版提高一倍 */
+    /* AXIS_LIFT_Z (0x204) 升降,Z —— 在原 100/320/1600 基础上等比例提速 50% */
     { 3, +1, MOTOR_REDUCTION_RATIO_3508,
-      100.0f, 320.0f, 1600.0f,
+      150.0f, 480.0f, 2400.0f,
       0.004f, 0.0f, 0.0f, 350u, 10u,
       12.0f, 0.15f, 2.0f, 15000u, 500u },
 
@@ -168,7 +168,7 @@ void Axis_SetTargetXGantry(int32_t x)
  * XY 联动路径上层封装 —— 给 CraneFlow / 测试入口用,不直接碰 crane_path 内部
  * ----------------------------------------------------------------------------
  * 典型用法(非阻塞):
- *   CranePath_Run(pts, num, blend);     // 构建并启动一条绕障路径
+ *   CranePath_Run(pts, num, blend);  // 构建并启动一条绕障路径
  *   ... 每周期 MotorSysTask 自动 XYPath_Tick,X/Y 自动跟踪 ...
  *   if (CranePath_IsDone()) CranePath_Finish();   // 到位后收尾,X/Y 交还各轴 traj
  * ============================================================================ */
@@ -506,8 +506,8 @@ typedef enum
 {
     VISION_SUB_IDLE = 0,
 
-    VISION_SUB_SAMPLE_LIFT_TOP,
-    VISION_SUB_SAMPLE_MOVE_XY,
+    VISION_SUB_SAMPLE_MOVE_Z_XY,
+    VISION_SUB_SAMPLE_CLAW_OPEN,
     VISION_SUB_SAMPLE_SEND_S,
     VISION_SUB_SAMPLE_WAIT_SDONE,
     VISION_SUB_WAIT_MATCH,
@@ -542,25 +542,36 @@ static const uint8_t vision_sample_order[VISION_ITEM_NUM] = { 1U, 2U, 0U };
 static const uint8_t vision_pick_order[VISION_ITEM_NUM] = { 0U, 2U, 1U };
 static box_t vision_place_table[VISION_ITEM_NUM];
 
+/* 视觉自动搬运采用 X/Y 分轴协调：X 每趟只设一次最终目标，Y 根据实际 X
+ * 位置依次切换绕桩侧。左桩固定负 Y、右桩固定正 Y，往返走同一条规则 S。 */
+#define VISION_ROUTE_MAX_OBSTACLES  2U
+
+typedef struct
+{
+    int32_t center_x;
+    int32_t detour_y;
+} vision_route_obstacle_t;
+
 typedef enum
 {
-    VISION_ZONE_LEFT = 0,
-    VISION_ZONE_MIDDLE,
-    VISION_ZONE_RIGHT,
-} vision_zone_t;
+    VISION_XY_MOVE_IDLE = 0,
+    VISION_XY_MOVE_DIRECT,
+    VISION_XY_MOVE_PREPARE_Y,
+    VISION_XY_MOVE_RUNNING,
+} vision_xy_move_state_t;
 
-#define VISION_PATH_MAX_POINTS  6U
-
-typedef enum
+static const vision_route_obstacle_t vision_route_obstacles[VISION_ROUTE_MAX_OBSTACLES] =
 {
-    VISION_PATH_IDLE = 0,
-    VISION_PATH_ACTIVE,
-    VISION_PATH_DIRECT,
-} vision_path_state_t;
+    { OBSTACLE_BEAN_X_COUNTS, DETOUR_BEAN_Y_COUNTS },
+    { OBSTACLE_BOX_X_COUNTS,  DETOUR_BOX_Y_COUNTS  },
+};
 
-static map_pt_t vision_path_points[VISION_PATH_MAX_POINTS];
-static map_pt_t vision_path_target;
-static vision_path_state_t vision_path_state = VISION_PATH_IDLE;
+static map_pt_t vision_xy_target;
+static uint8_t vision_route_order[VISION_ROUTE_MAX_OBSTACLES];
+static uint8_t vision_route_num = 0U;
+static uint8_t vision_route_index = 0U;
+static int8_t vision_route_dir = 0;
+static vision_xy_move_state_t vision_xy_move_state = VISION_XY_MOVE_IDLE;
 
 static uint8_t vision_active = 0U;
 static uint8_t vision_host_ready = 0U;
@@ -588,182 +599,184 @@ static uint8_t VisionFlow_XYAtTarget(int32_t x_counts, int32_t y_counts)
             VisionFlow_ValueReached(Axis_GetPos(AXIS_SLIDE_Y), y_counts, FLOW_TOL_Y));
 }
 
-static vision_zone_t VisionFlow_GetZone(int32_t x_counts)
+/* [ax,bx] 这段 X 行程是否横跨某根桩心(需固定绕桩)。端点顺序无所谓。 */
+static uint8_t VisionFlow_SpanCrossesX(int32_t ax, int32_t bx, int32_t center_x)
 {
-    if (x_counts < OBSTACLE_BEAN_X_COUNTS)
-    {
-        return VISION_ZONE_LEFT;
-    }
-    if (x_counts > OBSTACLE_BOX_X_COUNTS)
-    {
-        return VISION_ZONE_RIGHT;
-    }
-    return VISION_ZONE_MIDDLE;
+    int32_t lo = (ax < bx) ? ax : bx;
+    int32_t hi = (ax < bx) ? bx : ax;
+    return (lo <= center_x && center_x <= hi) ? 1U : 0U;
 }
 
-static uint8_t VisionFlow_AddObstacleGate(int32_t center_x, int32_t gate_y,
-                                          int8_t direction, uint8_t *point_num)
+static void VisionFlow_ClearXYMove(void)
 {
-    if (point_num == 0 || *point_num > (VISION_PATH_MAX_POINTS - 2U))
+    vision_route_num = 0U;
+    vision_route_index = 0U;
+    vision_route_dir = 0;
+    vision_xy_move_state = VISION_XY_MOVE_IDLE;
+}
+
+/* 按实际行进方向收集被跨越的桩。正向依次左/右，反向依次右/左。 */
+static void VisionFlow_BuildRoute(int32_t start_x, int32_t target_x)
+{
+    VisionFlow_ClearXYMove();
+
+    if (target_x > start_x)
+    {
+        vision_route_dir = +1;
+        if (VisionFlow_SpanCrossesX(start_x, target_x, OBSTACLE_BEAN_X_COUNTS))
+        {
+            vision_route_order[vision_route_num++] = 0U;
+        }
+        if (VisionFlow_SpanCrossesX(start_x, target_x, OBSTACLE_BOX_X_COUNTS))
+        {
+            vision_route_order[vision_route_num++] = 1U;
+        }
+    }
+    else if (target_x < start_x)
+    {
+        vision_route_dir = -1;
+        if (VisionFlow_SpanCrossesX(start_x, target_x, OBSTACLE_BOX_X_COUNTS))
+        {
+            vision_route_order[vision_route_num++] = 1U;
+        }
+        if (VisionFlow_SpanCrossesX(start_x, target_x, OBSTACLE_BEAN_X_COUNTS))
+        {
+            vision_route_order[vision_route_num++] = 0U;
+        }
+    }
+}
+
+static uint8_t VisionFlow_PassedCurrentObstacle(int32_t actual_x)
+{
+    const vision_route_obstacle_t *obstacle;
+    int32_t switch_x;
+
+    if (vision_route_index >= vision_route_num || vision_route_dir == 0)
     {
         return 0U;
     }
 
-    if (direction > 0)
-    {
-        vision_path_points[*point_num].x = center_x - OBSTACLE_GATE_HALF_X_COUNTS;
-        vision_path_points[*point_num].y = gate_y;
-        (*point_num)++;
-        vision_path_points[*point_num].x = center_x + OBSTACLE_GATE_HALF_X_COUNTS;
-        vision_path_points[*point_num].y = gate_y;
-        (*point_num)++;
-    }
-    else
-    {
-        vision_path_points[*point_num].x = center_x + OBSTACLE_GATE_HALF_X_COUNTS;
-        vision_path_points[*point_num].y = gate_y;
-        (*point_num)++;
-        vision_path_points[*point_num].x = center_x - OBSTACLE_GATE_HALF_X_COUNTS;
-        vision_path_points[*point_num].y = gate_y;
-        (*point_num)++;
-    }
-
-    return 1U;
+    obstacle = &vision_route_obstacles[vision_route_order[vision_route_index]];
+    switch_x = obstacle->center_x + (int32_t)vision_route_dir * OBSTACLE_SWITCH_X_COUNTS;
+    return (vision_route_dir > 0) ? (actual_x >= switch_x) : (actual_x <= switch_x);
 }
 
-static uint8_t VisionFlow_StartXYPath(int32_t x_counts, int32_t y_counts)
+static uint8_t VisionFlow_StartXYMove(int32_t x_counts, int32_t y_counts)
 {
     int32_t start_x = Gantry_GetAveragePos();
-    int32_t start_y = Axis_GetPos(AXIS_SLIDE_Y);
-    vision_zone_t start_zone = VisionFlow_GetZone(start_x);
-    vision_zone_t target_zone = VisionFlow_GetZone(x_counts);
-    uint8_t point_num = 0U;
 
-    if (CranePath_IsActive() || vision_path_state != VISION_PATH_IDLE)
+    if (CranePath_IsActive())
     {
         CranePath_Finish();
     }
+    if (vision_xy_move_state != VISION_XY_MOVE_IDLE)
+    {
+        MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
+        return 0U;
+    }
 
-    vision_path_target.x = x_counts;
-    vision_path_target.y = y_counts;
+    vision_xy_target.x = x_counts;
+    vision_xy_target.y = y_counts;
 
     if (VisionFlow_XYAtTarget(x_counts, y_counts))
     {
-        vision_path_state = VISION_PATH_IDLE;
+        VisionFlow_ClearXYMove();
         return 1U;
     }
 
-    if (start_x == x_counts && start_y == y_counts)
+    VisionFlow_BuildRoute(start_x, x_counts);
+    if (vision_route_num == 0U)
     {
         Axis_SetTargetXGantry(x_counts);
         Axis_SetTarget(AXIS_SLIDE_Y, y_counts);
-        vision_path_state = VISION_PATH_DIRECT;
-        return 1U;
+        vision_xy_move_state = VISION_XY_MOVE_DIRECT;
     }
-
-    vision_path_points[point_num].x = start_x;
-    vision_path_points[point_num].y = start_y;
-    point_num++;
-
-    if (start_zone < target_zone)
+    else
     {
-        if (start_zone == VISION_ZONE_LEFT)
-        {
-            if (!VisionFlow_AddObstacleGate(OBSTACLE_BEAN_X_COUNTS,
-                                            DETOUR_BEAN_Y_COUNTS, +1, &point_num))
-            {
-                MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
-                MotorControl_Stop();
-                return 0U;
-            }
-        }
-        if (target_zone == VISION_ZONE_RIGHT)
-        {
-            if (!VisionFlow_AddObstacleGate(OBSTACLE_BOX_X_COUNTS,
-                                            DETOUR_BOX_Y_COUNTS, +1, &point_num))
-            {
-                MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
-                MotorControl_Stop();
-                return 0U;
-            }
-        }
-    }
-    else if (start_zone > target_zone)
-    {
-        if (start_zone == VISION_ZONE_RIGHT)
-        {
-            if (!VisionFlow_AddObstacleGate(OBSTACLE_BOX_X_COUNTS,
-                                            DETOUR_BOX_Y_COUNTS, -1, &point_num))
-            {
-                MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
-                MotorControl_Stop();
-                return 0U;
-            }
-        }
-        if (target_zone == VISION_ZONE_LEFT)
-        {
-            if (!VisionFlow_AddObstacleGate(OBSTACLE_BEAN_X_COUNTS,
-                                            DETOUR_BEAN_Y_COUNTS, -1, &point_num))
-            {
-                MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
-                MotorControl_Stop();
-                return 0U;
-            }
-        }
+        const vision_route_obstacle_t *first =
+            &vision_route_obstacles[vision_route_order[0]];
+
+        /* 先把 Y 放到第一根桩的规定安全侧，再一次性启动 X 到最终目标。
+         * X 启动后不再设置任何中间 X 目标。 */
+        Axis_SetTarget(AXIS_SLIDE_Y, first->detour_y);
+        vision_xy_move_state = VISION_XY_MOVE_PREPARE_Y;
     }
 
-    if (point_num >= VISION_PATH_MAX_POINTS)
-    {
-        MotorDiag.fault_code = MOTOR_FAULT_PATH_BUILD;
-        MotorControl_Stop();
-        return 0U;
-    }
-
-    vision_path_points[point_num] = vision_path_target;
-    point_num++;
-    if (!CranePath_Run(vision_path_points, point_num, PATH_CORNER_BLEND_COUNTS))
-    {
-        vision_path_state = VISION_PATH_IDLE;
-        return 0U;
-    }
-
-    vision_path_state = VISION_PATH_ACTIVE;
+    MotorDiag.fault_code = MOTOR_FAULT_NONE;
     return 1U;
 }
 
-static uint8_t VisionFlow_XYPathReached(void)
+static uint8_t VisionFlow_XYMoveReached(void)
 {
-    if (vision_path_state == VISION_PATH_IDLE)
+    if (vision_xy_move_state == VISION_XY_MOVE_IDLE)
     {
-        return VisionFlow_XYAtTarget(vision_path_target.x, vision_path_target.y);
+        return VisionFlow_XYAtTarget(vision_xy_target.x, vision_xy_target.y);
     }
 
-    if (vision_path_state == VISION_PATH_DIRECT)
+    if (vision_xy_move_state == VISION_XY_MOVE_DIRECT)
     {
         if (GantryReached(FLOW_TOL_X) && Axis_IsReached(AXIS_SLIDE_Y, FLOW_TOL_Y))
         {
-            vision_path_state = VISION_PATH_IDLE;
+            VisionFlow_ClearXYMove();
             return 1U;
         }
         return 0U;
     }
 
-    if (!CranePath_IsDone() ||
-        !VisionFlow_XYAtTarget(vision_path_target.x, vision_path_target.y))
+    if (vision_xy_move_state == VISION_XY_MOVE_PREPARE_Y)
     {
+        if (Axis_IsReached(AXIS_SLIDE_Y, FLOW_TOL_Y))
+        {
+            Axis_SetTargetXGantry(vision_xy_target.x);
+            vision_xy_move_state = VISION_XY_MOVE_RUNNING;
+        }
         return 0U;
     }
 
-    CranePath_Finish();
-    vision_path_state = VISION_PATH_IDLE;
-    return 1U;
+    if (vision_xy_move_state == VISION_XY_MOVE_RUNNING)
+    {
+        if (VisionFlow_PassedCurrentObstacle(Gantry_GetAveragePos()))
+        {
+            vision_route_index++;
+            if (vision_route_index < vision_route_num)
+            {
+                const vision_route_obstacle_t *next =
+                    &vision_route_obstacles[vision_route_order[vision_route_index]];
+                Axis_SetTarget(AXIS_SLIDE_Y, next->detour_y);
+            }
+            else
+            {
+                /* 通过最后一根桩后立即斜向最终 Y；X 继续自己的单次高速轨迹。 */
+                Axis_SetTarget(AXIS_SLIDE_Y, vision_xy_target.y);
+            }
+        }
+
+        if (GantryReached(FLOW_TOL_X) && Axis_IsReached(AXIS_SLIDE_Y, FLOW_TOL_Y))
+        {
+            VisionFlow_ClearXYMove();
+            return 1U;
+        }
+    }
+
+    return 0U;
 }
 
 static void VisionFlow_StartSampleMove(void)
 {
+    const box_t *pick = &vision_pick_table[vision_sample_order[vision_sample_index]].pick;
+
+    /* 扫描开局并行启动升顶与 XY。后续采样时 Z 已在顶位，同一入口不会
+     * 额外引入升降动作；XY 协调器仍负责第一根桩的 Y 安全预置。 */
     set_z(Z_TOP);
     YawOpen();
-    vision_sub = VISION_SUB_SAMPLE_LIFT_TOP;
+    if (VisionFlow_StartXYMove(pick->x_counts, pick->y_counts))
+    {
+        vision_sub = VISION_SUB_SAMPLE_MOVE_Z_XY;
+    }
+    else
+    {
+        vision_sub = VISION_SUB_ERROR;
+    }
 }
 
 static void VisionFlow_StartPickPlace(void)
@@ -775,7 +788,7 @@ static void VisionFlow_StartPickPlace(void)
 
 static void VisionFlow_Reset(void)
 {
-    if (CranePath_IsActive() || vision_path_state != VISION_PATH_IDLE)
+    if (CranePath_IsActive())
     {
         CranePath_Finish();
     }
@@ -785,7 +798,7 @@ static void VisionFlow_Reset(void)
     vision_match_ready = 0U;
     vision_sample_index = 0U;
     vision_item_index = 0U;
-    vision_path_state = VISION_PATH_IDLE;
+    VisionFlow_ClearXYMove();
     vision_sub = VISION_SUB_IDLE;
 }
 
@@ -845,27 +858,28 @@ static void CraneFlow_VisionTick(void)
 {
     switch (vision_sub)
     {
-        case VISION_SUB_SAMPLE_LIFT_TOP:
-            if (Z_IsReached(FLOW_TOL_Z))
+        case VISION_SUB_SAMPLE_MOVE_Z_XY:
+        {
+            /* 必须每拍推进 XY 状态机，不能放在 Z 到位短路条件之后，否则
+             * X 会等 Z 完成后才启动，失去开局并行效果。 */
+            uint8_t xy_reached = VisionFlow_XYMoveReached();
+            if (Z_IsReached(FLOW_TOL_Z) && xy_reached)
             {
-                const box_t *pick = &vision_pick_table[vision_sample_order[vision_sample_index]].pick;
                 if (vision_sample_index == 0U)
                 {
                     ClawOpen();
-                }
-                if (VisionFlow_StartXYPath(pick->x_counts, pick->y_counts))
-                {
-                    vision_sub = VISION_SUB_SAMPLE_MOVE_XY;
+                    vision_sub = VISION_SUB_SAMPLE_CLAW_OPEN;
                 }
                 else
                 {
-                    vision_sub = VISION_SUB_ERROR;
+                    vision_sub = VISION_SUB_SAMPLE_SEND_S;
                 }
             }
             break;
+        }
 
-        case VISION_SUB_SAMPLE_MOVE_XY:
-            if (VisionFlow_XYPathReached())
+        case VISION_SUB_SAMPLE_CLAW_OPEN:
+            if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
             {
                 vision_sub = VISION_SUB_SAMPLE_SEND_S;
             }
@@ -911,7 +925,7 @@ static void CraneFlow_VisionTick(void)
             if (Z_IsReached(FLOW_TOL_Z) && Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
             {
                 const box_t *pick = &vision_pick_table[vision_pick_order[vision_item_index]].pick;
-                if (VisionFlow_StartXYPath(pick->x_counts, pick->y_counts))
+                if (VisionFlow_StartXYMove(pick->x_counts, pick->y_counts))
                 {
                     vision_sub = VISION_SUB_PICK_MOVE_XY;
                 }
@@ -923,7 +937,7 @@ static void CraneFlow_VisionTick(void)
             break;
 
         case VISION_SUB_PICK_MOVE_XY:
-            if (VisionFlow_XYPathReached())
+            if (VisionFlow_XYMoveReached())
             {
                 set_z(vision_pick_table[vision_pick_order[vision_item_index]].pick.z_counts);
                 vision_sub = VISION_SUB_PICK_DOWN;
@@ -950,7 +964,7 @@ static void CraneFlow_VisionTick(void)
             if (Z_IsReached(FLOW_TOL_Z))
             {
                 const box_t *place = &vision_place_table[vision_pick_order[vision_item_index]];
-                if (VisionFlow_StartXYPath(place->x_counts, place->y_counts))
+                if (VisionFlow_StartXYMove(place->x_counts, place->y_counts))
                 {
                     vision_sub = VISION_SUB_PLACE_MOVE_XY;
                 }
@@ -962,7 +976,7 @@ static void CraneFlow_VisionTick(void)
             break;
 
         case VISION_SUB_PLACE_MOVE_XY:
-            if (VisionFlow_XYPathReached())
+            if (VisionFlow_XYMoveReached())
             {
                 YawSetTarget(vision_place_table[vision_pick_order[vision_item_index]].yaw_counts);
                 vision_sub = VISION_SUB_PLACE_YAW;
@@ -988,7 +1002,14 @@ static void CraneFlow_VisionTick(void)
         case VISION_SUB_PLACE_CLAW_OPEN:
             if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
             {
+                const box_t *place = &vision_place_table[vision_pick_order[vision_item_index]];
+
                 set_z(Z_TOP);
+                /* ④/⑧的放置姿态非零，放货后让升顶和回正并行执行。 */
+                if (place->yaw_counts != POSE_YAW_ZERO)
+                {
+                    YawOpen();
+                }
                 vision_sub = VISION_SUB_PLACE_LIFT_AFTER;
             }
             break;
@@ -996,7 +1017,13 @@ static void CraneFlow_VisionTick(void)
         case VISION_SUB_PLACE_LIFT_AFTER:
             if (Z_IsReached(FLOW_TOL_Z))
             {
-                YawOpen();
+                const box_t *place = &vision_place_table[vision_pick_order[vision_item_index]];
+
+                /* ⑤/⑥/⑦保持原顺序；其放置姿态本来就是零位，不产生额外旋转。 */
+                if (place->yaw_counts == POSE_YAW_ZERO)
+                {
+                    YawOpen();
+                }
                 vision_sub = VISION_SUB_PLACE_YAW_RESET;
             }
             break;
@@ -1011,7 +1038,7 @@ static void CraneFlow_VisionTick(void)
                 }
                 else
                 {
-                    if (VisionFlow_StartXYPath(FLOW_X_HOME, 0))
+                    if (VisionFlow_StartXYMove(FLOW_X_HOME, 0))
                     {
                         vision_sub = VISION_SUB_RETURN_MOVE_HOME;
                     }
@@ -1024,7 +1051,7 @@ static void CraneFlow_VisionTick(void)
             break;
 
         case VISION_SUB_RETURN_MOVE_HOME:
-            if (VisionFlow_XYPathReached())
+            if (VisionFlow_XYMoveReached())
             {
                 ClawClose();
                 vision_sub = VISION_SUB_RETURN_CLAW_CLOSE;
@@ -1048,12 +1075,12 @@ static void CraneFlow_VisionTick(void)
             break;
 
         case VISION_SUB_ERROR:
-            if (CranePath_IsActive() || vision_path_state != VISION_PATH_IDLE)
+            if (CranePath_IsActive())
             {
                 CranePath_Finish();
             }
             MotorControl_Stop();
-            vision_path_state = VISION_PATH_IDLE;
+            VisionFlow_ClearXYMove();
             vision_active = 0U;
             break;
 
@@ -1386,10 +1413,21 @@ static uint8_t MotorRuntimeSafetyCheck(void)
     MotorDiag.gantry_left_pos = left;
     MotorDiag.gantry_right_pos = right;
     MotorDiag.gantry_sync_error = (int32_t)sync_error;
-    MotorDiag.path_x_ref = crane_path.x_ref;
-    MotorDiag.path_y_ref = crane_path.y_ref;
-    MotorDiag.path_x_ff = crane_path.x_ff;
-    MotorDiag.path_y_ff = crane_path.y_ff;
+    if (XYPath_IsActive(&crane_path))
+    {
+        MotorDiag.path_x_ref = crane_path.x_ref;
+        MotorDiag.path_y_ref = crane_path.y_ref;
+        MotorDiag.path_x_ff = crane_path.x_ff;
+        MotorDiag.path_y_ff = crane_path.y_ff;
+    }
+    else
+    {
+        /* 分轴视觉搬运/普通单轴模式：诊断量直接显示各轴轨迹参考和速度。 */
+        MotorDiag.path_x_ref = axis[AXIS_GANTRY_L].traj.out;
+        MotorDiag.path_y_ref = axis[AXIS_SLIDE_Y].traj.out;
+        MotorDiag.path_x_ff = axis[AXIS_GANTRY_L].traj.vel;
+        MotorDiag.path_y_ff = axis[AXIS_SLIDE_Y].traj.vel;
+    }
     MotorDiag.actual_min_clearance = (bean_distance < box_distance) ? bean_distance : box_distance;
 
     if (sync_error > GANTRY_SYNC_FAULT_COUNTS || sync_error < -GANTRY_SYNC_FAULT_COUNTS)
@@ -1403,16 +1441,8 @@ static uint8_t MotorRuntimeSafetyCheck(void)
         return 0U;
     }
 
-    if (MotorDiag.actual_min_clearance < OBSTACLE_CLEARANCE_COUNTS)
-    {
-        MotorDiag.fault_code = MOTOR_FAULT_RUNTIME_CLEARANCE;
-        if (vision_active)
-        {
-            vision_sub = VISION_SUB_ERROR;
-        }
-        MotorControl_Stop();
-        return 0U;
-    }
+    /* 备用 CranePath 由 CranePath_Run 逐段校验；视觉分轴路线使用固定规则侧和
+     * 过桩切换距离。运行中统一只记录实测净空，龙门左右同步检查仍实时保护。 */
 
     return 1U;
 }

@@ -86,22 +86,25 @@ typedef struct
 #define OBSTACLE_BOX_X_COUNTS           (828350)
 #define OBSTACLE_BOX_Y_COUNTS           (MAP_Y_OFFSET_COUNTS)
 
-/* 夹具/货物安全包络:
- * 51mm 圆柱半径 + 200mm 货物半径 + 50mm 静态余量 + 50mm 制动余量 = 351mm。 */
+/* 夹具与货物外廓相同，统一使用同一安全包络：
+ * 51mm 圆柱半径 + 200mm 夹具/货物半径 + 50mm 静态余量 + 50mm 制动余量 = 351mm。 */
 #define OBSTACLE_RADIUS_COUNTS           53854.0f
-#define PAYLOAD_RADIUS_COUNTS           211192.0f
+#define TOOL_RADIUS_COUNTS              211192.0f
 #define OBSTACLE_STATIC_MARGIN_COUNTS    52798.0f
 #define OBSTACLE_BRAKE_MARGIN_COUNTS     52798.0f
 #define OBSTACLE_CLEARANCE_COUNTS        370642.0f
 
-/* 每根圆柱使用前后两个门点。门点 X 距圆心 300mm,Y 沿用已验证的⑦/⑤位置。 */
-#define OBSTACLE_GATE_HALF_X_COUNTS      316788
+/* 规则 S 路径的两侧绕行位置：左桩走负 Y，右桩走正 Y。
+ * 直接复用已实测的⑦/⑤位置，二者到对应桩心的距离均大于 351mm 安全包络。 */
 #define DETOUR_BEAN_Y_COUNTS             PLACE_7_Y_COUNTS
 #define DETOUR_BOX_Y_COUNTS              PLACE_5_Y_COUNTS
 
-/* 200mm 拐角圆弧(原 150mm)。弧越长,过桩门点处路径方向转得越缓,
- * X/Y 分量速度切换越平顺,缓解过桩时龙门窜/小车顿。 */
-#define PATH_CORNER_BLEND_COUNTS         211192.0f
+/* X 越过当前桩心 100mm 后，Y 才允许离开当前安全侧并切换下一目标。
+ * 100mm × 1055.96 counts/mm = 105596 counts。 */
+#define OBSTACLE_SWITCH_X_COUNTS         105596
+
+/* 备用 XYPath 的纯折线配置；视觉自动搬运改用 X/Y 分轴协调，不再读取此值。 */
+#define PATH_CORNER_BLEND_COUNTS         0.0f
 
 /* 用户可编辑的默认任务表。视觉模式下实际 place 由 MATCH 数据覆盖。 */
 #define MISSION_TABLE  { \
