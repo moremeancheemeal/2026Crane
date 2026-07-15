@@ -168,11 +168,7 @@ void VisionComm_Poll(void)
         return;
     }
 
-    if (strcmp(line, "READY") == 0)
-    {
-        CraneFlow_OnVisionReady();
-    }
-    else if (strcmp(line, "start") == 0)
+    if (strcmp(line, "start") == 0)
     {
         CraneFlow_OnVisionStart();
     }

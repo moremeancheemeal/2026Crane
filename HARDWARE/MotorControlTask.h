@@ -83,6 +83,7 @@ typedef enum
     MOTOR_FAULT_PATH_CLEARANCE,
     MOTOR_FAULT_RUNTIME_CLEARANCE,
     MOTOR_FAULT_GANTRY_SYNC,
+    MOTOR_FAULT_VISION_TIMEOUT,
 } motor_fault_t;
 
 /* Keil Watch 诊断量。所有位置/距离均为 dir 校正后的 counts。 */
@@ -206,7 +207,6 @@ uint8_t SlideY_IsReached(void);               /* 滑行是否到位(非阻塞) *
  * CraneFlow_Tick():每控制周期调用,处理步骤内"到位后自动接续"。 */
 void    CraneFlow_Step(void);
 void    CraneFlow_Tick(void);
-void    CraneFlow_OnVisionReady(void);
 void    CraneFlow_OnVisionStart(void);
 void    CraneFlow_OnVisionClassifyDone(void);
 void    CraneFlow_OnVisionMatch(uint8_t pos1, uint8_t pos2, uint8_t pos3);

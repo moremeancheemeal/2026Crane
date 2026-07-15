@@ -17,5 +17,6 @@ uint8_t VisionPosition_GetPlace(uint8_t vision_pos, box_t *place)
     }
 
     *place = place_table[vision_pos - VISION_POSITION_MIN];
+    place->z_counts = Z_PLACE;  /* MATCH 只选择放置点，不能改变统一放置高度。 */
     return 1U;
 }

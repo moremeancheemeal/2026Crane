@@ -652,6 +652,16 @@
           <GroupName>HARDWARE</GroupName>
           <Files>
             <File>
+              <FileName>Buzzer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\HARDWARE\Buzzer.c</FilePath>
+            </File>
+            <File>
+              <FileName>Buzzer.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\HARDWARE\Buzzer.h</FilePath>
+            </File>
+            <File>
               <FileName>ControlTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\HARDWARE\ControlTask.c</FilePath>

@@ -43,6 +43,7 @@
 #include "math.h"
 #include "uart_comm.h"
 #include "VisionComm.h"
+#include "Buzzer.h"
 //#include "kalman.h"
 /* USER CODE END Includes */
 
@@ -207,6 +208,10 @@ int main(void)
   MX_UART7_Init();
   MX_UART8_Init();
   /* USER CODE BEGIN 2 */
+	if (Buzzer_Init() == HAL_OK)
+	{
+		Buzzer_Play(BUZZER_SOUND_POWER_ON);
+	}
  	CANFilterInit();//锟斤拷锟斤拷CAN通锟斤拷
 
 	ParamInit();//pid param init

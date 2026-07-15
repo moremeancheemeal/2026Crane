@@ -6,6 +6,7 @@
 #include "XYPath.h"
 #include "VisionComm.h"
 #include "VisionPositionMap.h"
+#include "Buzzer.h"
 
 #include <math.h>
 
@@ -69,6 +70,9 @@ moto_measure_t  Motor[MOTOR_NUM];
 volatile motor_diag_t MotorDiag = {0};
 
 static uint8_t motor_control_enable = 0U;
+
+static void MotorPidClear(void);
+static void MotorTargetSync(void);
 
 /* XY 联动路径插值器(折线 + 拐角圆弧)。路径模式下 X/Y 的位置环 ref 取自这里,
  * 绕过各轴自己的 axis[i].traj,保证末端沿确定几何路径绕障。其余轴不受影响。 */
@@ -188,6 +192,7 @@ uint8_t CranePath_Run(const map_pt_t *pts, uint8_t num, float blend_radius)
         MotorDiag.path_min_clearance = 0.0f;
         XYPath_Stop(&crane_path);
         MotorControl_Stop();
+        Buzzer_Play(BUZZER_SOUND_ERROR);
         return 0U;
     }
 
@@ -208,6 +213,7 @@ uint8_t CranePath_Run(const map_pt_t *pts, uint8_t num, float blend_radius)
         MotorDiag.fault_code = MOTOR_FAULT_PATH_CLEARANCE;
         XYPath_Stop(&crane_path);
         MotorControl_Stop();
+        Buzzer_Play(BUZZER_SOUND_ERROR);
         return 0U;
     }
 
@@ -402,11 +408,11 @@ uint8_t Z_IsReached(int32_t tol_counts)
 static const int32_t z_height_points[Z_HEIGHT_NUM] =
 {
     Z_TOP,     /* 抬顶(去三层前) */
-    Z_LAYER_3, /* 第三点位 */
+    PICK_3_Z_COUNTS, /* 第三点位 */
     Z_TOP,     /* 抬顶(去二层前) */
-    Z_LAYER_2, /* 第二点位 */
+    PICK_2_Z_COUNTS, /* 第二点位 */
     Z_TOP,     /* 抬顶(去一层前) */
-    Z_LAYER_1, /* 第一点位 */
+    PICK_1_Z_COUNTS, /* 第一点位 */
     Z_PLACE,   /* 放货高度 */
     Z_TOP,     /* 放货后抬顶 */
     Z_BOTTOM,  /* 回 Z0(上电高度) */
@@ -448,7 +454,7 @@ void ZHeightStep(void)
  *
  * 全程保持使能(Z 升降轴不失能,避免重力掉落)。
  * ============================================================================ */
-#define FLOW_Z_LEVEL3      Z_LAYER_3   /* 第三点位 */
+#define FLOW_Z_LEVEL3      PICK_3_Z_COUNTS /* 第三点位 */
 #define FLOW_Z_PLACE       Z_PLACE     /* 放货高度 */
 #define FLOW_Z_BOTTOM      Z_BOTTOM    /* 底部 = 上电 Z0 */
 #define FLOW_X_HOME        (0)         /* 原点 = 上电 X0 */
@@ -501,13 +507,13 @@ static uint8_t GantryReached(int32_t tol)
 #define VISION_ITEM_NUM     3U
 #define FLOW_TOL_Y          15000
 #define FLOW_TOL_YAW        10000
+#define VISION_SUB_TIMEOUT_MS  10000U
 
 typedef enum
 {
     VISION_SUB_IDLE = 0,
 
     VISION_SUB_SAMPLE_MOVE_Z_XY,
-    VISION_SUB_SAMPLE_CLAW_OPEN,
     VISION_SUB_SAMPLE_SEND_S,
     VISION_SUB_SAMPLE_WAIT_SDONE,
     VISION_SUB_WAIT_MATCH,
@@ -528,6 +534,7 @@ typedef enum
     VISION_SUB_RETURN_MOVE_HOME,
     VISION_SUB_RETURN_CLAW_CLOSE,
     VISION_SUB_RETURN_DOWN_BOTTOM,
+    VISION_SUB_TIMEOUT,
     VISION_SUB_DONE,
     VISION_SUB_ERROR,
 } vision_sub_t;
@@ -574,12 +581,81 @@ static int8_t vision_route_dir = 0;
 static vision_xy_move_state_t vision_xy_move_state = VISION_XY_MOVE_IDLE;
 
 static uint8_t vision_active = 0U;
-static uint8_t vision_host_ready = 0U;
+static uint8_t vision_timeout_latched = 0U;
 static uint8_t vision_classify_done = 0U;
 static uint8_t vision_match_ready = 0U;
 static uint8_t vision_sample_index = 0U;
+static uint8_t vision_sample_claw_open_started = 0U;
 static uint8_t vision_item_index = 0U;
+static uint32_t vision_sub_enter_tick = 0U;
 static vision_sub_t vision_sub = VISION_SUB_IDLE;
+
+static void VisionFlow_SetSub(vision_sub_t next)
+{
+    if (vision_sub == next)
+    {
+        return;
+    }
+
+    vision_sub = next;
+    vision_sub_enter_tick = HAL_GetTick();
+    switch (next)
+    {
+        case VISION_SUB_SAMPLE_MOVE_Z_XY:
+            if (vision_sample_index == 0U)
+            {
+                Buzzer_Play(BUZZER_SOUND_CLASSIFY);
+            }
+            break;
+        case VISION_SUB_PICK_LIFT_TOP:
+            Buzzer_Play(BUZZER_SOUND_PICK);
+            break;
+        case VISION_SUB_PLACE_MOVE_XY:
+            Buzzer_Play(BUZZER_SOUND_PLACE);
+            break;
+        case VISION_SUB_RETURN_MOVE_HOME:
+            Buzzer_Play(BUZZER_SOUND_RETURN);
+            break;
+        case VISION_SUB_DONE:
+            Buzzer_Play(BUZZER_SOUND_COMPLETE);
+            break;
+        case VISION_SUB_ERROR:
+            Buzzer_Play(BUZZER_SOUND_ERROR);
+            break;
+        case VISION_SUB_TIMEOUT:
+            Buzzer_Play(BUZZER_SOUND_TIMEOUT);
+            break;
+        default:
+            break;
+    }
+}
+
+static uint8_t VisionFlow_IsTimedSub(vision_sub_t sub)
+{
+    switch (sub)
+    {
+        case VISION_SUB_SAMPLE_MOVE_Z_XY:
+        case VISION_SUB_SAMPLE_WAIT_SDONE:
+        case VISION_SUB_WAIT_MATCH:
+        case VISION_SUB_PICK_LIFT_TOP:
+        case VISION_SUB_PICK_MOVE_XY:
+        case VISION_SUB_PICK_DOWN:
+        case VISION_SUB_PICK_CLAW_CLOSE:
+        case VISION_SUB_PICK_LIFT_AFTER:
+        case VISION_SUB_PLACE_MOVE_XY:
+        case VISION_SUB_PLACE_YAW:
+        case VISION_SUB_PLACE_DOWN:
+        case VISION_SUB_PLACE_CLAW_OPEN:
+        case VISION_SUB_PLACE_LIFT_AFTER:
+        case VISION_SUB_PLACE_YAW_RESET:
+        case VISION_SUB_RETURN_MOVE_HOME:
+        case VISION_SUB_RETURN_CLAW_CLOSE:
+        case VISION_SUB_RETURN_DOWN_BOTTOM:
+            return 1U;
+        default:
+            return 0U;
+    }
+}
 
 static uint8_t VisionFlow_ValueReached(int32_t value, int32_t target, int32_t tol)
 {
@@ -764,18 +840,33 @@ static uint8_t VisionFlow_XYMoveReached(void)
 static void VisionFlow_StartSampleMove(void)
 {
     const box_t *pick = &vision_pick_table[vision_sample_order[vision_sample_index]].pick;
+    uint8_t xy_started;
 
-    /* 扫描开局并行启动升顶与 XY。后续采样时 Z 已在顶位，同一入口不会
-     * 额外引入升降动作；XY 协调器仍负责第一根桩的 Y 安全预置。 */
+    /* 首个采样点已确认无遮挡，开局同拍下发 Z/X/Y，跳过通用绕障器的
+     * “先预置 Y、再启动 X”。后续采样仍走正常的 XY 绕障协调。 */
     set_z(Z_TOP);
     YawOpen();
-    if (VisionFlow_StartXYMove(pick->x_counts, pick->y_counts))
+    if (vision_sample_index == 0U)
     {
-        vision_sub = VISION_SUB_SAMPLE_MOVE_Z_XY;
+        vision_xy_target.x = pick->x_counts;
+        vision_xy_target.y = pick->y_counts;
+        Axis_SetTargetXGantry(pick->x_counts);
+        Axis_SetTarget(AXIS_SLIDE_Y, pick->y_counts);
+        vision_xy_move_state = VISION_XY_MOVE_DIRECT;
+        xy_started = 1U;
     }
     else
     {
-        vision_sub = VISION_SUB_ERROR;
+        xy_started = VisionFlow_StartXYMove(pick->x_counts, pick->y_counts);
+    }
+
+    if (xy_started)
+    {
+        VisionFlow_SetSub(VISION_SUB_SAMPLE_MOVE_Z_XY);
+    }
+    else
+    {
+        VisionFlow_SetSub(VISION_SUB_ERROR);
     }
 }
 
@@ -783,7 +874,7 @@ static void VisionFlow_StartPickPlace(void)
 {
     set_z(Z_TOP);
     YawOpen();
-    vision_sub = VISION_SUB_PICK_LIFT_TOP;
+    VisionFlow_SetSub(VISION_SUB_PICK_LIFT_TOP);
 }
 
 static void VisionFlow_Reset(void)
@@ -797,9 +888,11 @@ static void VisionFlow_Reset(void)
     vision_classify_done = 0U;
     vision_match_ready = 0U;
     vision_sample_index = 0U;
+    vision_sample_claw_open_started = 0U;
     vision_item_index = 0U;
     VisionFlow_ClearXYMove();
     vision_sub = VISION_SUB_IDLE;
+    vision_sub_enter_tick = HAL_GetTick();
 }
 
 uint8_t CraneFlow_IsVisionActive(void)
@@ -807,14 +900,12 @@ uint8_t CraneFlow_IsVisionActive(void)
     return vision_active;
 }
 
-void CraneFlow_OnVisionReady(void)
-{
-    vision_host_ready = 1U;
-}
-
 void CraneFlow_OnVisionStart(void)
 {
-    (void)vision_host_ready;
+    if (vision_active || vision_timeout_latched)
+    {
+        return;
+    }
 
     MotorControl_Enable();
     flow_step = 0U;
@@ -827,7 +918,7 @@ void CraneFlow_OnVisionStart(void)
 
 void CraneFlow_OnVisionClassifyDone(void)
 {
-    if (vision_active)
+    if (vision_active && vision_sub == VISION_SUB_SAMPLE_WAIT_SDONE)
     {
         vision_classify_done = 1U;
     }
@@ -835,11 +926,22 @@ void CraneFlow_OnVisionClassifyDone(void)
 
 void CraneFlow_OnVisionMatch(uint8_t pos1, uint8_t pos2, uint8_t pos3)
 {
+    if (!vision_active || vision_sub != VISION_SUB_WAIT_MATCH)
+    {
+        return;
+    }
+
+    if (pos1 == pos2 || pos1 == pos3 || pos2 == pos3)
+    {
+        VisionFlow_SetSub(VISION_SUB_ERROR);
+        return;
+    }
+
     if (!VisionPosition_GetPlace(pos1, &vision_place_table[vision_sample_order[0]]) ||
         !VisionPosition_GetPlace(pos2, &vision_place_table[vision_sample_order[1]]) ||
         !VisionPosition_GetPlace(pos3, &vision_place_table[vision_sample_order[2]]))
     {
-        vision_sub = VISION_SUB_ERROR;
+        VisionFlow_SetSub(VISION_SUB_ERROR);
         return;
     }
 
@@ -850,50 +952,78 @@ void CraneFlow_OnVisionError(void)
 {
     if (vision_active)
     {
-        vision_sub = VISION_SUB_ERROR;
+        VisionFlow_SetSub(VISION_SUB_ERROR);
     }
+}
+
+static void VisionFlow_EnterTimeout(void)
+{
+    if (vision_timeout_latched)
+    {
+        return;
+    }
+
+    if (CranePath_IsActive())
+    {
+        CranePath_Finish();
+    }
+
+    VisionFlow_ClearXYMove();
+    MotorTargetSync();
+    MotorPidClear();
+    motor_control_enable = 1U;
+
+    vision_classify_done = 0U;
+    vision_match_ready = 0U;
+    vision_timeout_latched = 1U;
+    vision_active = 0U;
+    MotorDiag.fault_code = MOTOR_FAULT_VISION_TIMEOUT;
+    VisionFlow_SetSub(VISION_SUB_TIMEOUT);
 }
 
 static void CraneFlow_VisionTick(void)
 {
+    vision_sub_t sub_before = vision_sub;
+
     switch (vision_sub)
     {
         case VISION_SUB_SAMPLE_MOVE_Z_XY:
         {
-            /* 必须每拍推进 XY 状态机，不能放在 Z 到位短路条件之后，否则
-             * X 会等 Z 完成后才启动，失去开局并行效果。 */
+            uint8_t z_reached = Z_IsReached(FLOW_TOL_Z);
             uint8_t xy_reached = VisionFlow_XYMoveReached();
-            if (Z_IsReached(FLOW_TOL_Z) && xy_reached)
+
+            if (vision_sample_index == 0U)
             {
-                if (vision_sample_index == 0U)
+                /* 张爪只依赖 Z 到顶，不等待仍在并行移动的 X/Y。 */
+                if (!vision_sample_claw_open_started && z_reached)
                 {
                     ClawOpen();
-                    vision_sub = VISION_SUB_SAMPLE_CLAW_OPEN;
+                    vision_sample_claw_open_started = 1U;
                 }
-                else
+
+                /* 识别仍需等待第一个采样点到位且爪子张开完成。 */
+                if (vision_sample_claw_open_started && xy_reached &&
+                    Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
                 {
-                    vision_sub = VISION_SUB_SAMPLE_SEND_S;
+                    VisionFlow_SetSub(VISION_SUB_SAMPLE_SEND_S);
                 }
+            }
+            else if (z_reached && xy_reached)
+            {
+                VisionFlow_SetSub(VISION_SUB_SAMPLE_SEND_S);
             }
             break;
         }
-
-        case VISION_SUB_SAMPLE_CLAW_OPEN:
-            if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
-            {
-                vision_sub = VISION_SUB_SAMPLE_SEND_S;
-            }
-            break;
 
         case VISION_SUB_SAMPLE_SEND_S:
             if (VisionComm_SendClassifyTrigger() == HAL_OK)
             {
                 vision_classify_done = 0U;
-                vision_sub = VISION_SUB_SAMPLE_WAIT_SDONE;
+                VisionFlow_SetSub(VISION_SUB_SAMPLE_WAIT_SDONE);
             }
             else
             {
-                vision_sub = VISION_SUB_ERROR;
+                VisionFlow_SetSub(VISION_SUB_ERROR);
             }
             break;
 
@@ -908,7 +1038,7 @@ static void CraneFlow_VisionTick(void)
                 }
                 else
                 {
-                    vision_sub = VISION_SUB_WAIT_MATCH;
+                    VisionFlow_SetSub(VISION_SUB_WAIT_MATCH);
                 }
             }
             break;
@@ -927,11 +1057,11 @@ static void CraneFlow_VisionTick(void)
                 const box_t *pick = &vision_pick_table[vision_pick_order[vision_item_index]].pick;
                 if (VisionFlow_StartXYMove(pick->x_counts, pick->y_counts))
                 {
-                    vision_sub = VISION_SUB_PICK_MOVE_XY;
+                    VisionFlow_SetSub(VISION_SUB_PICK_MOVE_XY);
                 }
                 else
                 {
-                    vision_sub = VISION_SUB_ERROR;
+                    VisionFlow_SetSub(VISION_SUB_ERROR);
                 }
             }
             break;
@@ -940,7 +1070,7 @@ static void CraneFlow_VisionTick(void)
             if (VisionFlow_XYMoveReached())
             {
                 set_z(vision_pick_table[vision_pick_order[vision_item_index]].pick.z_counts);
-                vision_sub = VISION_SUB_PICK_DOWN;
+                VisionFlow_SetSub(VISION_SUB_PICK_DOWN);
             }
             break;
 
@@ -948,7 +1078,7 @@ static void CraneFlow_VisionTick(void)
             if (Z_IsReached(FLOW_TOL_Z))
             {
                 ClawClose();
-                vision_sub = VISION_SUB_PICK_CLAW_CLOSE;
+                VisionFlow_SetSub(VISION_SUB_PICK_CLAW_CLOSE);
             }
             break;
 
@@ -956,7 +1086,7 @@ static void CraneFlow_VisionTick(void)
             if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
             {
                 set_z(Z_TOP);
-                vision_sub = VISION_SUB_PICK_LIFT_AFTER;
+                VisionFlow_SetSub(VISION_SUB_PICK_LIFT_AFTER);
             }
             break;
 
@@ -966,11 +1096,11 @@ static void CraneFlow_VisionTick(void)
                 const box_t *place = &vision_place_table[vision_pick_order[vision_item_index]];
                 if (VisionFlow_StartXYMove(place->x_counts, place->y_counts))
                 {
-                    vision_sub = VISION_SUB_PLACE_MOVE_XY;
+                    VisionFlow_SetSub(VISION_SUB_PLACE_MOVE_XY);
                 }
                 else
                 {
-                    vision_sub = VISION_SUB_ERROR;
+                    VisionFlow_SetSub(VISION_SUB_ERROR);
                 }
             }
             break;
@@ -979,15 +1109,16 @@ static void CraneFlow_VisionTick(void)
             if (VisionFlow_XYMoveReached())
             {
                 YawSetTarget(vision_place_table[vision_pick_order[vision_item_index]].yaw_counts);
-                vision_sub = VISION_SUB_PLACE_YAW;
+                VisionFlow_SetSub(VISION_SUB_PLACE_YAW);
             }
             break;
 
         case VISION_SUB_PLACE_YAW:
             if (Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
             {
-                set_z(vision_place_table[vision_pick_order[vision_item_index]].z_counts);
-                vision_sub = VISION_SUB_PLACE_DOWN;
+                /* MATCH 只决定 X/Y/Yaw；所有④～⑧放置动作强制使用同一高度。 */
+                set_z(FLOW_Z_PLACE);
+                VisionFlow_SetSub(VISION_SUB_PLACE_DOWN);
             }
             break;
 
@@ -995,7 +1126,7 @@ static void CraneFlow_VisionTick(void)
             if (Z_IsReached(FLOW_TOL_Z))
             {
                 ClawOpen();
-                vision_sub = VISION_SUB_PLACE_CLAW_OPEN;
+                VisionFlow_SetSub(VISION_SUB_PLACE_CLAW_OPEN);
             }
             break;
 
@@ -1010,7 +1141,7 @@ static void CraneFlow_VisionTick(void)
                 {
                     YawOpen();
                 }
-                vision_sub = VISION_SUB_PLACE_LIFT_AFTER;
+                VisionFlow_SetSub(VISION_SUB_PLACE_LIFT_AFTER);
             }
             break;
 
@@ -1024,7 +1155,7 @@ static void CraneFlow_VisionTick(void)
                 {
                     YawOpen();
                 }
-                vision_sub = VISION_SUB_PLACE_YAW_RESET;
+                VisionFlow_SetSub(VISION_SUB_PLACE_YAW_RESET);
             }
             break;
 
@@ -1040,11 +1171,11 @@ static void CraneFlow_VisionTick(void)
                 {
                     if (VisionFlow_StartXYMove(FLOW_X_HOME, 0))
                     {
-                        vision_sub = VISION_SUB_RETURN_MOVE_HOME;
+                        VisionFlow_SetSub(VISION_SUB_RETURN_MOVE_HOME);
                     }
                     else
                     {
-                        vision_sub = VISION_SUB_ERROR;
+                        VisionFlow_SetSub(VISION_SUB_ERROR);
                     }
                 }
             }
@@ -1054,7 +1185,7 @@ static void CraneFlow_VisionTick(void)
             if (VisionFlow_XYMoveReached())
             {
                 ClawClose();
-                vision_sub = VISION_SUB_RETURN_CLAW_CLOSE;
+                VisionFlow_SetSub(VISION_SUB_RETURN_CLAW_CLOSE);
             }
             break;
 
@@ -1062,7 +1193,7 @@ static void CraneFlow_VisionTick(void)
             if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
             {
                 set_z(FLOW_Z_BOTTOM);
-                vision_sub = VISION_SUB_RETURN_DOWN_BOTTOM;
+                VisionFlow_SetSub(VISION_SUB_RETURN_DOWN_BOTTOM);
             }
             break;
 
@@ -1070,7 +1201,7 @@ static void CraneFlow_VisionTick(void)
             if (Z_IsReached(FLOW_TOL_Z))
             {
                 vision_active = 0U;
-                vision_sub = VISION_SUB_DONE;
+                VisionFlow_SetSub(VISION_SUB_DONE);
             }
             break;
 
@@ -1085,9 +1216,17 @@ static void CraneFlow_VisionTick(void)
             break;
 
         case VISION_SUB_IDLE:
+        case VISION_SUB_TIMEOUT:
         case VISION_SUB_DONE:
         default:
             break;
+    }
+
+    /* Completion processed above wins when it arrives on the 10 s boundary. */
+    if (vision_active && vision_sub == sub_before && VisionFlow_IsTimedSub(vision_sub) &&
+        (uint32_t)(HAL_GetTick() - vision_sub_enter_tick) >= VISION_SUB_TIMEOUT_MS)
+    {
+        VisionFlow_EnterTimeout();
     }
 }
 
@@ -1095,7 +1234,7 @@ static void CraneFlow_VisionTick(void)
  * 避免中途打断。走完第6步后再按 -> 从头重来。 */
 void CraneFlow_Step(void)
 {
-    if (vision_active)
+    if (vision_active || vision_timeout_latched)
     {
         return;
     }
@@ -1116,6 +1255,7 @@ void CraneFlow_Step(void)
     }
 
     flow_step++;
+    Buzzer_Play(BUZZER_SOUND_STATE_CHANGE);
     switch (flow_step)
     {
         case 1U: set_z(Z_TOP);                       flow_sub = SUB_1_LIFT_TOP;  break; /* 升顶->横移P0 */
@@ -1131,6 +1271,11 @@ void CraneFlow_Step(void)
 /* 每控制周期调用:处理大步骤内部"到位后自动接续"。跑到子序列末尾 -> SUB_DONE 等下一次按键。 */
 void CraneFlow_Tick(void)
 {
+    if (vision_timeout_latched)
+    {
+        return;
+    }
+
     if (vision_active)
     {
         CraneFlow_VisionTick();
@@ -1181,7 +1326,11 @@ void CraneFlow_Tick(void)
             if (GantryReached(FLOW_TOL_X)) { set_z(FLOW_Z_BOTTOM); flow_sub = SUB_6_DOWN_BOTTOM; }
             break;
         case SUB_6_DOWN_BOTTOM:
-            if (Z_IsReached(FLOW_TOL_Z)) { flow_sub = SUB_DONE; }
+            if (Z_IsReached(FLOW_TOL_Z))
+            {
+                flow_sub = SUB_DONE;
+                Buzzer_Play(BUZZER_SOUND_COMPLETE);
+            }
             break;
 
         case SUB_DONE:
@@ -1435,7 +1584,11 @@ static uint8_t MotorRuntimeSafetyCheck(void)
         MotorDiag.fault_code = MOTOR_FAULT_GANTRY_SYNC;
         if (vision_active)
         {
-            vision_sub = VISION_SUB_ERROR;
+            VisionFlow_SetSub(VISION_SUB_ERROR);
+        }
+        else
+        {
+            Buzzer_Play(BUZZER_SOUND_ERROR);
         }
         MotorControl_Stop();
         return 0U;

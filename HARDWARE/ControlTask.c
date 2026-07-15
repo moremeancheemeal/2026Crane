@@ -3,6 +3,7 @@
 #include "main.h"
 #include "MotorControlTask.h"
 #include "VisionComm.h"
+#include "Buzzer.h"
 
 #define ABOARD_POS_KEY_PORT     GPIOB
 #define ABOARD_POS_KEY_PIN      GPIO_PIN_2
@@ -42,6 +43,7 @@ void AllTask(void)
     MotorSysTask();
     VisionComm_Poll();
     CraneFlow_Tick();           /* 每周期推进自动取放流程的"到位后接续" */
+    Buzzer_Task();
 
     key_scan_cnt++;
     if (key_scan_cnt < 10)
