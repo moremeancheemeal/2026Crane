@@ -507,6 +507,7 @@ static uint8_t GantryReached(int32_t tol)
 #define VISION_ITEM_NUM     3U
 #define FLOW_TOL_Y          15000
 #define FLOW_TOL_YAW        10000
+#define FLOW_PLACE_XY_CLEARANCE_COUNTS  50000
 #define VISION_SUB_TIMEOUT_MS  10000U
 
 typedef enum
@@ -556,6 +557,7 @@ static box_t vision_place_table[VISION_ITEM_NUM];
 typedef struct
 {
     int32_t center_x;
+    int32_t center_y;
     int32_t detour_y;
 } vision_route_obstacle_t;
 
@@ -569,8 +571,8 @@ typedef enum
 
 static const vision_route_obstacle_t vision_route_obstacles[VISION_ROUTE_MAX_OBSTACLES] =
 {
-    { OBSTACLE_BEAN_X_COUNTS, DETOUR_BEAN_Y_COUNTS },
-    { OBSTACLE_BOX_X_COUNTS,  DETOUR_BOX_Y_COUNTS  },
+    { OBSTACLE_BEAN_X_COUNTS, OBSTACLE_BEAN_Y_COUNTS, DETOUR_BEAN_Y_COUNTS },
+    { OBSTACLE_BOX_X_COUNTS,  OBSTACLE_BOX_Y_COUNTS,  DETOUR_BOX_Y_COUNTS  },
 };
 
 static map_pt_t vision_xy_target;
@@ -587,6 +589,7 @@ static uint8_t vision_match_ready = 0U;
 static uint8_t vision_sample_index = 0U;
 static uint8_t vision_sample_claw_open_started = 0U;
 static uint8_t vision_item_index = 0U;
+static int32_t vision_place_lift_start_z = 0;
 static uint32_t vision_sub_enter_tick = 0U;
 static vision_sub_t vision_sub = VISION_SUB_IDLE;
 
@@ -683,6 +686,16 @@ static uint8_t VisionFlow_SpanCrossesX(int32_t ax, int32_t bx, int32_t center_x)
     return (lo <= center_x && center_x <= hi) ? 1U : 0U;
 }
 
+/* y 已达到或越过该桩规定的绕行点，即处于同侧且净空不小于标定值。 */
+static uint8_t VisionFlow_YOnSafeSide(int32_t y, const vision_route_obstacle_t *obstacle)
+{
+    if (obstacle->detour_y < obstacle->center_y)
+    {
+        return (y <= obstacle->detour_y) ? 1U : 0U;
+    }
+    return (y >= obstacle->detour_y) ? 1U : 0U;
+}
+
 static void VisionFlow_ClearXYMove(void)
 {
     vision_route_num = 0U;
@@ -772,10 +785,18 @@ static uint8_t VisionFlow_StartXYMove(int32_t x_counts, int32_t y_counts)
         const vision_route_obstacle_t *first =
             &vision_route_obstacles[vision_route_order[0]];
 
-        /* 先把 Y 放到第一根桩的规定安全侧，再一次性启动 X 到最终目标。
-         * X 启动后不再设置任何中间 X 目标。 */
-        Axis_SetTarget(AXIS_SLIDE_Y, first->detour_y);
-        vision_xy_move_state = VISION_XY_MOVE_PREPARE_Y;
+        if (VisionFlow_YOnSafeSide(Axis_GetPos(AXIS_SLIDE_Y), first))
+        {
+            /* 当前 Y 已在第一根桩的安全侧，无需重复预定位，立即启动 X。 */
+            Axis_SetTargetXGantry(x_counts);
+            vision_xy_move_state = VISION_XY_MOVE_RUNNING;
+        }
+        else
+        {
+            /* 当前 Y 净空不足时才先预置到第一根桩的规定安全侧。 */
+            Axis_SetTarget(AXIS_SLIDE_Y, first->detour_y);
+            vision_xy_move_state = VISION_XY_MOVE_PREPARE_Y;
+        }
     }
 
     MotorDiag.fault_code = MOTOR_FAULT_NONE;
@@ -818,11 +839,21 @@ static uint8_t VisionFlow_XYMoveReached(void)
             {
                 const vision_route_obstacle_t *next =
                     &vision_route_obstacles[vision_route_order[vision_route_index]];
-                Axis_SetTarget(AXIS_SLIDE_Y, next->detour_y);
+                int32_t next_y = next->detour_y;
+
+                /* 最终 Y 若已比下一绕行点更靠安全侧，直接使用最终 Y。 */
+                if (VisionFlow_YOnSafeSide(vision_xy_target.y, next))
+                {
+                    next_y = vision_xy_target.y;
+                }
+                if (axis[AXIS_SLIDE_Y].target != next_y)
+                {
+                    Axis_SetTarget(AXIS_SLIDE_Y, next_y);
+                }
             }
-            else
+            else if (axis[AXIS_SLIDE_Y].target != vision_xy_target.y)
             {
-                /* 通过最后一根桩后立即斜向最终 Y；X 继续自己的单次高速轨迹。 */
+                /* 最终 Y 尚未提前使用时，通过最后一根桩后再切换。 */
                 Axis_SetTarget(AXIS_SLIDE_Y, vision_xy_target.y);
             }
         }
@@ -877,6 +908,37 @@ static void VisionFlow_StartPickPlace(void)
     VisionFlow_SetSub(VISION_SUB_PICK_LIFT_TOP);
 }
 
+/* 放货后已经取得 50000 counts 的垂直净空，后续 XY 不再等待 Z 到顶。 */
+static void VisionFlow_AdvanceAfterPlace(void)
+{
+    vision_item_index++;
+    if (vision_item_index < VISION_ITEM_NUM)
+    {
+        const box_t *pick = &vision_pick_table[vision_pick_order[vision_item_index]].pick;
+
+        Buzzer_Play(BUZZER_SOUND_PICK);
+        if (VisionFlow_StartXYMove(pick->x_counts, pick->y_counts))
+        {
+            VisionFlow_SetSub(VISION_SUB_PICK_MOVE_XY);
+        }
+        else
+        {
+            VisionFlow_SetSub(VISION_SUB_ERROR);
+        }
+    }
+    else
+    {
+        if (VisionFlow_StartXYMove(FLOW_X_HOME, 0))
+        {
+            VisionFlow_SetSub(VISION_SUB_RETURN_MOVE_HOME);
+        }
+        else
+        {
+            VisionFlow_SetSub(VISION_SUB_ERROR);
+        }
+    }
+}
+
 static void VisionFlow_Reset(void)
 {
     if (CranePath_IsActive())
@@ -890,6 +952,7 @@ static void VisionFlow_Reset(void)
     vision_sample_index = 0U;
     vision_sample_claw_open_started = 0U;
     vision_item_index = 0U;
+    vision_place_lift_start_z = 0;
     VisionFlow_ClearXYMove();
     vision_sub = VISION_SUB_IDLE;
     vision_sub_enter_tick = HAL_GetTick();
@@ -1133,51 +1196,35 @@ static void CraneFlow_VisionTick(void)
         case VISION_SUB_PLACE_CLAW_OPEN:
             if (Axis_IsReached(AXIS_CLAW, FLOW_TOL_CLAW))
             {
-                const box_t *place = &vision_place_table[vision_pick_order[vision_item_index]];
-
+                vision_place_lift_start_z = Z_GetHeight();
                 set_z(Z_TOP);
-                /* ④/⑧的放置姿态非零，放货后让升顶和回正并行执行。 */
-                if (place->yaw_counts != POSE_YAW_ZERO)
-                {
-                    YawOpen();
-                }
                 VisionFlow_SetSub(VISION_SUB_PLACE_LIFT_AFTER);
             }
             break;
 
         case VISION_SUB_PLACE_LIFT_AFTER:
-            if (Z_IsReached(FLOW_TOL_Z))
+            /* Z 坐标越负越高；以放货后的实测位置为起点累计上升量。 */
+            if (((int64_t)vision_place_lift_start_z - (int64_t)Z_GetHeight()) >=
+                (int64_t)FLOW_PLACE_XY_CLEARANCE_COUNTS)
             {
                 const box_t *place = &vision_place_table[vision_pick_order[vision_item_index]];
 
-                /* ⑤/⑥/⑦保持原顺序；其放置姿态本来就是零位，不产生额外旋转。 */
-                if (place->yaw_counts == POSE_YAW_ZERO)
+                if (place->yaw_counts != POSE_YAW_ZERO)
                 {
                     YawOpen();
+                    VisionFlow_SetSub(VISION_SUB_PLACE_YAW_RESET);
                 }
-                VisionFlow_SetSub(VISION_SUB_PLACE_YAW_RESET);
+                else
+                {
+                    VisionFlow_AdvanceAfterPlace();
+                }
             }
             break;
 
         case VISION_SUB_PLACE_YAW_RESET:
             if (Axis_IsReached(AXIS_YAW, FLOW_TOL_YAW))
             {
-                vision_item_index++;
-                if (vision_item_index < VISION_ITEM_NUM)
-                {
-                    VisionFlow_StartPickPlace();
-                }
-                else
-                {
-                    if (VisionFlow_StartXYMove(FLOW_X_HOME, 0))
-                    {
-                        VisionFlow_SetSub(VISION_SUB_RETURN_MOVE_HOME);
-                    }
-                    else
-                    {
-                        VisionFlow_SetSub(VISION_SUB_ERROR);
-                    }
-                }
+                VisionFlow_AdvanceAfterPlace();
             }
             break;
 
