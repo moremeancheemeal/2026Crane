@@ -100,6 +100,7 @@ static const buzzer_note_t buzzer_timeout[] =
 static const buzzer_pattern_t buzzer_patterns[BUZZER_SOUND_COUNT] =
 {
     { 0, 0U },
+    { buzzer_complete,     BUZZER_ARRAY_SIZE(buzzer_complete) },
     { buzzer_power_on,     BUZZER_ARRAY_SIZE(buzzer_power_on) },
     { buzzer_state_change, BUZZER_ARRAY_SIZE(buzzer_state_change) },
     { buzzer_classify,     BUZZER_ARRAY_SIZE(buzzer_classify) },

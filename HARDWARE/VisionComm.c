@@ -1,5 +1,6 @@
 #include "VisionComm.h"
 
+#include "Buzzer.h"
 #include "MotorControlTask.h"
 #include <string.h>
 
@@ -8,6 +9,7 @@
 
 static UART_HandleTypeDef *vision_uart = 0;
 static uint8_t vision_rx_byte = 0U;
+static uint8_t vision_host_ready = 0U;
 
 static volatile uint8_t vision_rx_index = 0U;
 static volatile uint8_t vision_line_ready = 0U;
@@ -25,6 +27,7 @@ static void VisionComm_ResetRxLine(void)
 void VisionComm_Init(UART_HandleTypeDef *huart)
 {
     vision_uart = huart;
+    vision_host_ready = 0U;
     vision_line_ready = 0U;
     vision_line_overflow = 0U;
     VisionComm_ResetRxLine();
@@ -33,6 +36,11 @@ void VisionComm_Init(UART_HandleTypeDef *huart)
     {
         (void)HAL_UART_Receive_IT(vision_uart, &vision_rx_byte, 1U);
     }
+}
+
+uint8_t VisionComm_IsReady(void)
+{
+    return vision_host_ready;
 }
 
 void VisionComm_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -168,9 +176,21 @@ void VisionComm_Poll(void)
         return;
     }
 
-    if (strcmp(line, "start") == 0)
+    if (strcmp(line, "READY") == 0)
     {
-        CraneFlow_OnVisionStart();
+        vision_host_ready = 1U;
+        Buzzer_Play(BUZZER_SOUND_POWER_ON);
+    }
+    else if (strcmp(line, "start") == 0)
+    {
+        if (vision_host_ready)
+        {
+            CraneFlow_OnVisionStart();
+        }
+        else
+        {
+            Buzzer_Play(BUZZER_SOUND_ERROR);
+        }
     }
     else if (strcmp(line, "SDONE") == 0)
     {

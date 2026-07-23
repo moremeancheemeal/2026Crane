@@ -6,6 +6,7 @@
 typedef enum
 {
     BUZZER_SOUND_NONE = 0,
+    BUZZER_SOUND_BOOT,           /* three short high tones at MCU power-on */
     BUZZER_SOUND_POWER_ON,       /* DJI-style startup melody */
     BUZZER_SOUND_STATE_CHANGE,   /* one short high tone */
     BUZZER_SOUND_CLASSIFY,       /* two short high tones */

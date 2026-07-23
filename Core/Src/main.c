@@ -210,7 +210,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 	if (Buzzer_Init() == HAL_OK)
 	{
-		Buzzer_Play(BUZZER_SOUND_POWER_ON);
+		Buzzer_Play(BUZZER_SOUND_BOOT);
 	}
  	CANFilterInit();//锟斤拷锟斤拷CAN通锟斤拷
 

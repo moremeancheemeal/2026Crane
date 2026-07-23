@@ -7,6 +7,7 @@
 void VisionComm_Init(UART_HandleTypeDef *huart);
 void VisionComm_RxCpltCallback(UART_HandleTypeDef *huart);
 void VisionComm_Poll(void);
+uint8_t VisionComm_IsReady(void);
 
 HAL_StatusTypeDef VisionComm_SendLine(const char *line);
 HAL_StatusTypeDef VisionComm_SendClassifyTrigger(void);
