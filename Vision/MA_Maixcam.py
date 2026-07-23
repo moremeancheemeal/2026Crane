@@ -16,6 +16,7 @@ TCP_IP   = "0.0.0.0"
 TCP_PORT = 9090
 AP_IP    = "192.168.66.1"
 UART_PORT = "/dev/ttyS0"
+# UART_PORT = "/dev/ttyS1" #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 UART_BAUD = 115200
 CLASSIFIER_PATH = "/root/my_classes.bin"
 MODEL_PATH      = "/root/models/mobilenet_v2_no_top.mud"
@@ -32,6 +33,7 @@ print(f"[WIFI] AP: {WIFI_SSID} @ {AP_IP}")
 
 # ======================== 初始化 UART ========================
 pin_function = {"A16": "UART0_TX","A17": "UART0_RX"}
+# pin_function = {"A19": "UART1_TX","A18": "UART1_RX"}#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 for pin, func in pin_function.items():
     err.check_raise(pinmap.set_pin_function(pin, func), f"Pin {pin} fail")
 
@@ -319,7 +321,8 @@ while st.running:
             if match_result:
                 img.draw_string(10, 10, f"CLS:[{match_result['cls']}]", image.COLOR_GREEN)
                 img.draw_string(10, 30, f"OCR:[{match_result['ocr']}]", image.COLOR_GREEN)
-                img.draw_string(10, 50, f"MATCH:[{match_result['match']}]", image.COLOR_GRAY)
+                img.draw_string(10, 50, f"MATCH:[{match_result['match']}]", image.COLOR_BLUE,scale = 1)
+                img.draw_string(20, 120, "OVER!", image.COLOR_PURPLE)
             else:
                 img.draw_string(10, 10, "Match failed!", image.COLOR_RED)
                 img.draw_string(10, 30, status_msg, image.COLOR_YELLOW)
