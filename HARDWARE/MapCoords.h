@@ -54,12 +54,15 @@ typedef struct
 #define MAP_Y_OFFSET_COUNTS  (-22227)
 
 /* ---- 取货区实测点位:扫描使用相同 XY + Z_TOP_TRAVEL,抓取时下降到各自 Z ---- */
-#define PICK_1_Y_COUNTS    ( 519015)
-#define PICK_1_Z_COUNTS    (-120000)
-#define PICK_2_Y_COUNTS    (-530727)
-#define PICK_2_Z_COUNTS    (-80000)
-#define PICK_3_Y_COUNTS    (-10926)
-#define PICK_3_Z_COUNTS    (-152000)
+#define PICK_1_Y_COUNTS    ( 528305)//第二层
+#define PICK_1_Z_COUNTS    (-128000)//第二层
+
+#define PICK_2_Y_COUNTS    (-530727)//第一层
+#define PICK_2_Z_COUNTS    (-80000)//第一层
+
+#define PICK_3_Y_COUNTS    (-10926)//第三层
+#define PICK_3_Z_COUNTS    (-168644)//第三层
+
 #define BOX_PICK_1   { -2160287, PICK_1_Y_COUNTS, PICK_1_Z_COUNTS, POSE_YAW_ZERO }  /* ① 白芸豆 */
 #define BOX_PICK_2   { -2160287, PICK_2_Y_COUNTS, PICK_2_Z_COUNTS, POSE_YAW_ZERO }  /* ② 绿豆   */
 #define BOX_PICK_3   { -1893572, PICK_3_Y_COUNTS, PICK_3_Z_COUNTS, POSE_YAW_ZERO }  /* ③ 黄豆   */
